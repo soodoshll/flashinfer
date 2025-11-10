@@ -21,9 +21,9 @@ import torch
 if torch.cuda.is_available():
     import os
 
-    print(
-        "[INFO] Patching torch.cuda.get_device_capability() to normalize SM 10.x to 10.0"
-    )
+    # print(
+    #     "[INFO] Patching torch.cuda.get_device_capability() to normalize SM 10.x to 10.0"
+    # )
     # Only patch when TRTLLM_FAKE_RUBIN mode is active (fake driver enabled)
     _cuda_sm_override = os.getenv("CUDA_SM_VERSION_OVERRIDE", "")
     if _cuda_sm_override.startswith("10."):
