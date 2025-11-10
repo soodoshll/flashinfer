@@ -14,6 +14,29 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+# Patch torch.cuda.get_device_capability() to normalize SM 10.x to 10.0 for Triton
+# Only applies when CUDA_SM_VERSION_OVERRIDE=10.7 (fake Rubin mode)
+import torch
+
+if torch.cuda.is_available():
+    import os
+
+    print(
+        "[INFO] Patching torch.cuda.get_device_capability() to normalize SM 10.x to 10.0"
+    )
+    # Only patch when TRTLLM_FAKE_RUBIN mode is active (fake driver enabled)
+    _cuda_sm_override = os.getenv("CUDA_SM_VERSION_OVERRIDE", "")
+    if _cuda_sm_override.startswith("10."):
+        _original_get_device_capability = torch.cuda.get_device_capability
+
+        def _patched_get_device_capability(device=None):
+            major, minor = _original_get_device_capability(device)
+            if major == 10:
+                minor = 0
+            return (major, minor)
+
+        torch.cuda.get_device_capability = _patched_get_device_capability
+
 import contextlib
 import importlib.util
 
