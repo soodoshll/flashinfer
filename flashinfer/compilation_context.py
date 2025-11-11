@@ -44,6 +44,8 @@ class CompilationContext:
                     if major >= 9:
                         minor = str(minor) + "a"
                     self.TARGET_CUDA_ARCHS.add((int(major), str(minor)))
+                    if major == 10 and minor == 7:
+                        self.TARGET_CUDA_ARCHS.add((10, "0f"))
             except Exception as e:
                 logger.warning(f"Failed to get device capability: {e}.")
 

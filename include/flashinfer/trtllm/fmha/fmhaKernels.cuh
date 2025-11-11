@@ -65,6 +65,8 @@ constexpr bool isFamilySpecificSMPair(int sm1, int sm2) {
 constexpr bool isSMCompatible(int gpuSM, int kernelSM) {
   if (gpuSM == kSM_103) {
     return kernelSM == kSM_100f || kernelSM == kSM_103;
+  } else if (gpuSM == kSM_107) {
+    return kernelSM == kSM_100f || kernelSM == kSM_107;
   } else if (gpuSM == kSM_100) {
     return kernelSM == kSM_100f || kernelSM == kSM_100;
   }

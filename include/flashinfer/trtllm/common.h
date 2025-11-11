@@ -86,9 +86,6 @@ inline int getSMVersion() {
   int sm_minor = 0;
   CUDACHECK(cudaDeviceGetAttribute(&sm_major, cudaDevAttrComputeCapabilityMajor, device));
   CUDACHECK(cudaDeviceGetAttribute(&sm_minor, cudaDevAttrComputeCapabilityMinor, device));
-  if (sm_major == 10 && sm_minor == 7) {
-    sm_minor = 3;
-  }
   return sm_major * 10 + sm_minor;
 }
 
@@ -329,5 +326,6 @@ constexpr int32_t kSM_90 = 90;
 constexpr int32_t kSM_100 = 100;
 constexpr int32_t kSM_100f = 10100;
 constexpr int32_t kSM_103 = 103;
+constexpr int32_t kSM_107 = 107;
 constexpr int32_t kSM_120 = 120;
 constexpr int32_t kSM_121 = 121;
