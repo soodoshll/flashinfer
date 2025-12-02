@@ -31,7 +31,7 @@ from .jit import (
     sm110a_nvcc_flags,
     sm103a_nvcc_flags,
     sm100a_nvcc_flags,
-    sm100f_nvcc_flags,
+    sm107a_nvcc_flags,
     sm90a_nvcc_flags,
 )
 from .jit.cpp_ext import is_cuda_version_at_least
@@ -89,7 +89,7 @@ def gen_fp4_quantization_sm103_module() -> JitSpec:
 
 
 def gen_fp4_quantization_sm107_module() -> JitSpec:
-    return gen_fp4_quantization_module(sm100f_nvcc_flags, "100")
+    return gen_fp4_quantization_module(sm107a_nvcc_flags, "107")
 
 
 def gen_fp4_quantization_sm90_module() -> JitSpec:
@@ -145,11 +145,10 @@ def get_fp4_quantization_module(backend: str = "100"):
         "121": gen_fp4_quantization_sm121_module,
         "120": gen_fp4_quantization_sm120_module,
         "110": gen_fp4_quantization_sm110_module,
+        "107": gen_fp4_quantization_sm107_module,
         "103": gen_fp4_quantization_sm103_module,
         "100": gen_fp4_quantization_sm100_module,
         "90": gen_fp4_quantization_sm90_module,
-        ######### WAR:
-        "107": gen_fp4_quantization_sm107_module,
     }
 
     if backend not in backend_modules:
