@@ -284,6 +284,7 @@ routine_cc_to_supported_backends = {
         "9.0": ["fa2", "fa2_tc", "auto", "cudnn", "trtllm-native"],
         "10.0": ["fa2", "fa2_tc", "auto", "cudnn", "trtllm-gen", "trtllm-native"],
         "10.3": ["fa2", "fa2_tc", "auto", "cudnn", "trtllm-gen", "trtllm-native"],
+        "10.7": ["fa2", "fa2_tc", "auto", "cudnn", "trtllm-gen", "trtllm-native"],
         "12.0": ["fa2", "fa2_tc", "auto", "cudnn", "trtllm-native"],
     },
     "BatchPrefillWithPagedKVCacheWrapper": {
@@ -296,6 +297,7 @@ routine_cc_to_supported_backends = {
         "9.0": ["fa2", "fa3", "auto", "cudnn", "cudnn-native"],
         "10.0": ["fa2", "auto", "cudnn", "cudnn-native", "trtllm-gen", "trtllm-native"],
         "10.3": ["fa2", "auto", "cudnn", "cudnn-native", "trtllm-gen", "trtllm-native"],
+        "10.7": ["fa2", "auto", "cudnn", "cudnn-native", "trtllm-gen", "trtllm-native"],
         "12.0": ["fa2", "auto", "cudnn", "cudnn-native"],
     },
     "BatchPrefillWithRaggedKVCacheWrapper": {
@@ -308,6 +310,7 @@ routine_cc_to_supported_backends = {
         "9.0": ["fa2", "fa3", "cudnn", "cudnn-native"],
         "10.0": ["fa2", "cudnn", "cudnn-native", "cutlass", "trtllm-native"],
         "10.3": ["fa2", "cudnn", "cudnn-native", "cutlass", "trtllm-native"],
+        "10.7": ["fa2", "cudnn", "cudnn-native", "cutlass", "trtllm-native"],
         "12.0": ["fa2", "cudnn", "cudnn-native"],
     },
     "BatchMLAPagedAttentionWrapper": {
@@ -319,6 +322,7 @@ routine_cc_to_supported_backends = {
         "9.0": ["fa2", "fa3"],
         "10.0": ["fa2", "cutlass", "trtllm-native"],
         "10.3": ["fa2", "cutlass", "trtllm-native"],
+        "10.7": ["fa2", "cutlass", "trtllm-native"],
         "12.0": ["fa2"],
     },
     # GEMM
@@ -330,6 +334,7 @@ routine_cc_to_supported_backends = {
         "9.0": [],
         "10.0": ["cutlass"],
         "10.3": ["cutlass"],
+        "10.7": ["cutlass"],
         "12.0": [],
     },
     "group_gemm_fp8_nt_groupwise": {
@@ -340,6 +345,7 @@ routine_cc_to_supported_backends = {
         "9.0": [],
         "10.0": ["cutlass"],
         "10.3": ["cutlass"],
+        "10.7": ["cutlass"],
         "12.0": [],
     },
     "bmm_fp8": {
@@ -350,6 +356,7 @@ routine_cc_to_supported_backends = {
         "9.0": ["cudnn", "cublas"],
         "10.0": ["cudnn", "cublas", "cutlass"],
         "10.3": ["cudnn", "cublas", "cutlass"],
+        "10.7": ["cudnn", "cublas", "cutlass"],
         "12.0": ["cudnn", "cublas"],
     },
     "bmm_mxfp8": {
@@ -383,6 +390,7 @@ routine_cc_to_supported_backends = {
         "9.0": [],
         "10.0": ["trtllm"],
         "10.3": ["trtllm"],
+        "10.7": ["trtllm"],
         "12.0": [],
     },
     "trtllm_fp8_block_scale_moe": {
@@ -393,6 +401,7 @@ routine_cc_to_supported_backends = {
         "9.0": [],
         "10.0": ["trtllm"],
         "10.3": ["trtllm"],
+        "10.7": ["trtllm"],
         "12.0": [],
     },
     "trtllm_fp8_per_tensor_scale_moe": {
@@ -403,6 +412,7 @@ routine_cc_to_supported_backends = {
         "9.0": [],
         "10.0": ["trtllm"],
         "10.3": ["trtllm"],
+        "10.7": ["trtllm"],
         "12.0": [],
     },
     "cutlass_fused_moe": {
@@ -413,6 +423,7 @@ routine_cc_to_supported_backends = {
         "9.0": [],
         "10.0": ["cutlass"],
         "10.3": ["cutlass"],
+        "10.7": ["cutlass"],
         "12.0": [],
     },
     # NORM

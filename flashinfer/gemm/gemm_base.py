@@ -3016,7 +3016,7 @@ def _check_mm_fp4_problem_size(
     return True
 
 
-@supported_compute_capability([100, 103, 110, 120, 121])
+@supported_compute_capability([100, 103, 107, 110, 120, 121])
 def _cudnn_gemm_fp4_requirement(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -3080,7 +3080,7 @@ def _cudnn_gemm_fp4_requirement(
     return True
 
 
-@supported_compute_capability([100, 103])
+@supported_compute_capability([100, 103, 107])
 def _trtllm_gemm_fp4_requirement(
     a: torch.Tensor,  # unused
     b: torch.Tensor,  # unused
@@ -3107,7 +3107,7 @@ def _trtllm_gemm_fp4_requirement(
     return True
 
 
-@supported_compute_capability([100, 103, 110, 120, 121])
+@supported_compute_capability([100, 103, 107, 110, 120, 121])
 def _cutlass_gemm_fp4_requirement(
     a: torch.Tensor,  # unused
     b: torch.Tensor,  # unused
@@ -3912,7 +3912,7 @@ def mm_fp4(
     return out
 
 
-@supported_compute_capability([89, 90, 100, 103, 110, 120, 121])
+@supported_compute_capability([89, 90, 100, 103, 107, 110, 120, 121])
 def _cudnn_bmm_fp8_requirement(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -3926,7 +3926,7 @@ def _cudnn_bmm_fp8_requirement(
     return True
 
 
-@supported_compute_capability([89, 90, 100, 103, 110, 120, 121])
+@supported_compute_capability([89, 90, 100, 103, 107, 110, 120, 121])
 def _cublas_bmm_fp8_requirement(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -3939,7 +3939,7 @@ def _cublas_bmm_fp8_requirement(
     return True
 
 
-@supported_compute_capability([100, 103, 110, 120, 121])
+@supported_compute_capability([100, 103, 107, 110, 120, 121])
 def _cutlass_bmm_fp8_requirement(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -3979,7 +3979,7 @@ def _heuristic_func_bmm_fp8(
 ):
     # No e5m2 for cutlass
     is_e5m2 = A.dtype == torch.float8_e5m2 or B.dtype == torch.float8_e5m2
-    is_sm_supported = _match_sm_version(A.device, ["100", "103", "110"])
+    is_sm_supported = _match_sm_version(A.device, ["100", "103", "107", "110"])
     is_sm120_supported = _match_sm_version(A.device, ["120", "121"])
 
     # preserve order of ["cudnn", "cublas", "cutlass"]
