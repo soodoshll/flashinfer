@@ -200,11 +200,11 @@ def transform_sf_into_required_layout(
     should_skip_transform = (
         sf.dtype == torch.int
         and gran == (1, 128)
-        and get_device_arch() in ("100a", "103a")
+        and get_device_arch() in ("100a", "103a", "107a")
     ) or (
         sf.dtype == torch.int
         and gran == (128, 128)
-        and get_device_arch() in ("100a", "103a")
+        and get_device_arch() in ("100a", "103a", "107a")
     )
 
     if not should_skip_transform:
@@ -219,7 +219,7 @@ def transform_sf_into_required_layout(
     if (
         sf.dtype == torch.float
         and gran == (1, 128)
-        and get_device_arch() in ("100a", "103a")
+        and get_device_arch() in ("100a", "103a", "107a")
     ):
         sf = get_col_major_tma_aligned_packed_tensor(sf)
         return check_sf_layout(
@@ -240,7 +240,7 @@ def transform_sf_into_required_layout(
     if (
         sf.dtype == torch.float
         and gran == (128, 128)
-        and get_device_arch() in ("100a", "103a")
+        and get_device_arch() in ("100a", "103a", "107a")
     ):
         sf = sf.index_select(-2, torch.arange(mn, device=sf.device) // 128)
         sf = get_col_major_tma_aligned_packed_tensor(sf)
@@ -290,6 +290,7 @@ def must_be_k_major() -> bool:
         "90a": True,
         "100a": False,
         "103a": False,
+        "107a": False,
     }[get_device_arch()]
 
 
@@ -304,6 +305,8 @@ def get_default_recipe(
         ("100a", torch.int): (1, 1, 128),
         ("103a", torch.float): (1, 128, 128),
         ("103a", torch.int): (1, 1, 128),
+        ("107a", torch.float): (1, 128, 128),
+        ("107a", torch.int): (1, 1, 128),
     }[(get_device_arch(), sfb_dtype)]
 
 
@@ -1460,6 +1463,12 @@ def m_grouped_fp8_gemm_nt_contiguous(
             major_b=major_b,
             compiled_dims=compiled_dims,
         ),
+        "107a": functools.partial(
+            m_grouped_fp8_gemm_nt_contiguous_sm10x,
+            major_a=major_a,
+            major_b=major_b,
+            compiled_dims=compiled_dims,
+        ),
     }[get_device_arch()]
     impl(a, sfa, b, sfb, d, m_indices)
 
@@ -1570,6 +1579,12 @@ def m_grouped_fp8_gemm_nt_masked(
             compiled_dims=compiled_dims,
         ),
         "103a": functools.partial(
+            m_grouped_fp8_gemm_nt_masked_sm10x,
+            major_a=major_a,
+            major_b=major_b,
+            compiled_dims=compiled_dims,
+        ),
+        "107a": functools.partial(
             m_grouped_fp8_gemm_nt_masked_sm10x,
             major_a=major_a,
             major_b=major_b,

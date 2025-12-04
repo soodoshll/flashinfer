@@ -258,7 +258,7 @@ def test_mxfp8_mxfp4_groupwise_group_gemm(
     # TODO: We need to add gemm_mxfp4_nt_groupwise support for sm120/121 at some point.
     if compute_capability[0] not in [10]:
         pytest.skip(
-            "gemm_mxfp4_nt_groupwise is only supported on SM100 and SM103 GPUs."
+            "gemm_mxfp4_nt_groupwise is only supported on SM100, SM103, and SM107 GPUs."
         )
     torch.random.manual_seed(0)
     tile_size = 32
