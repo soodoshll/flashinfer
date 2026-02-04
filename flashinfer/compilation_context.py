@@ -44,13 +44,13 @@ class CompilationContext:
                     if major >= 9:
                         minor = str(minor) + "a"
                     self.TARGET_CUDA_ARCHS.add((int(major), str(minor)))
-                    if major == 10 and minor == 7:
-                        self.TARGET_CUDA_ARCHS.add((10, "0f"))
             except Exception as e:
                 logger.warning(f"Failed to get device capability: {e}.")
 
     def get_nvcc_flags_list(
-        self, supported_major_versions: list[int] = None
+        self,
+        supported_major_versions: list[int] = None,
+        map_sm107_to_100f: bool = False,
     ) -> list[str]:
         if supported_major_versions:
             supported_cuda_archs = [
@@ -64,7 +64,16 @@ class CompilationContext:
             raise RuntimeError(
                 f"No supported CUDA architectures found for major versions {supported_major_versions}."
             )
-        return [
-            f"-gencode=arch=compute_{major}{minor},code=sm_{major}{minor}"
-            for major, minor in supported_cuda_archs
-        ] + self.COMMON_NVCC_FLAGS
+
+        flags = []
+        for major, minor in supported_cuda_archs:
+            # When map_sm107_to_100f is True, SM107 (10, "7a") uses 100f flags
+            # to match pre-compiled cubins that target the sm100f family base.
+            if map_sm107_to_100f and major == 10 and minor == "7a":
+                flags.append("-gencode=arch=compute_100f,code=sm_100f")
+            else:
+                flags.append(
+                    f"-gencode=arch=compute_{major}{minor},code=sm_{major}{minor}"
+                )
+
+        return flags + self.COMMON_NVCC_FLAGS

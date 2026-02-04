@@ -42,6 +42,8 @@ enum class CudaArch {
   Sm100f,
   // Blackwell Ultra
   Sm103a,
+  // Rubin
+  Sm107a,
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -50,7 +52,7 @@ inline bool isArchHopper(CudaArch cudaArch) { return cudaArch == CudaArch::Sm90a
 
 inline bool isArchBlackwell(CudaArch cudaArch) {
   return cudaArch == CudaArch::Sm100a || cudaArch == CudaArch::Sm100f ||
-         cudaArch == CudaArch::Sm103a;
+         cudaArch == CudaArch::Sm103a || cudaArch == CudaArch::Sm107a;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -65,6 +67,8 @@ inline std::string cudaArchToString(CudaArch cudaArch, bool isFull = true) {
       return isFull ? "100f" : "100";
     case CudaArch::Sm103a:
       return isFull ? "103a" : "103";
+    case CudaArch::Sm107a:
+      return isFull ? "107a" : "107";
     default:
       assert(false);
       return "";
@@ -82,6 +86,8 @@ inline CudaArch stringToCudaArch(std::string const& str) {
     return CudaArch::Sm100f;
   } else if (str == "103a") {
     return CudaArch::Sm103a;
+  } else if (str == "107a") {
+    return CudaArch::Sm107a;
   } else {
     assert(false);
     return CudaArch::Sm100a;

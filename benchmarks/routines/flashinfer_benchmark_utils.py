@@ -354,9 +354,9 @@ routine_cc_to_supported_backends = {
         "8.6": [],
         "8.9": ["cudnn", "cublas"],
         "9.0": ["cudnn", "cublas"],
-        "10.0": ["cudnn", "cublas", "cutlass"],
-        "10.3": ["cudnn", "cublas", "cutlass"],
-        "10.7": ["cudnn", "cublas", "cutlass"],
+        "10.0": ["cudnn", "cublas", "cutlass", "cute-dsl"],
+        "10.3": ["cudnn", "cublas", "cutlass", "cute-dsl"],
+        "10.7": ["cudnn", "cublas", "cutlass", "cute-dsl"],
         "12.0": ["cudnn", "cublas"],
     },
     "bmm_mxfp8": {

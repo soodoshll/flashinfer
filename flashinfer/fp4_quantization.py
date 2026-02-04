@@ -31,7 +31,8 @@ from .jit import (
     sm110a_nvcc_flags,
     sm103a_nvcc_flags,
     sm100a_nvcc_flags,
-    sm107a_nvcc_flags,
+    sm100f_nvcc_flags,
+    # sm100f_nvcc_flags, # Use this after CUTLASS update
     sm90a_nvcc_flags,
 )
 from .jit.cpp_ext import is_cuda_version_at_least
@@ -89,7 +90,9 @@ def gen_fp4_quantization_sm103_module() -> JitSpec:
 
 
 def gen_fp4_quantization_sm107_module() -> JitSpec:
-    return gen_fp4_quantization_module(sm107a_nvcc_flags, "107")
+    # SM107 to 100f for fp4 quantization until we update
+    # CUTLASS that recognizes SM107 as a valid architecture.
+    return gen_fp4_quantization_module(sm100f_nvcc_flags, "107")
 
 
 def gen_fp4_quantization_sm90_module() -> JitSpec:

@@ -1366,7 +1366,7 @@ def m_grouped_fp8_gemm_nt_masked_sm10x(
     runtime(**all_kwargs)
 
 
-@supported_compute_capability([100, 103])
+@supported_compute_capability([100, 103, 107])
 def _check_group_deepgemm_fp8_nt_contiguous_problem_size(
     a_fp8: Tuple[torch.Tensor, torch.Tensor],
     b_fp8: Tuple[torch.Tensor, torch.Tensor],
@@ -1473,7 +1473,7 @@ def m_grouped_fp8_gemm_nt_contiguous(
     impl(a, sfa, b, sfb, d, m_indices)
 
 
-@supported_compute_capability([100, 103])
+@supported_compute_capability([100, 103, 107])
 def _check_m_grouped_fp8_gemm_nt_masked_problem_size(
     a_fp8: Tuple[torch.Tensor, torch.Tensor],
     b_fp8: Tuple[torch.Tensor, torch.Tensor],

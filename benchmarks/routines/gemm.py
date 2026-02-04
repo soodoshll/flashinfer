@@ -603,6 +603,7 @@ def testBmmFp8(args):
     run_refcheck = args.refcheck
     autotune_supported_backends = [
         "cutlass",
+        "cute-dsl",
     ]
     res = []
 
@@ -663,7 +664,7 @@ def testBmmFp8(args):
         print(f"[VVERBOSE] {mat2_inv_s.dtype = }")
 
     def run_backend(backend, input_fp8, mat2_fp8, input_inv_s, mat2_inv_s):
-        if backend in ["cudnn", "cublas", "cutlass"]:
+        if backend in ["cudnn", "cublas", "cutlass", "cute-dsl"]:
             return flashinfer.gemm.bmm_fp8(
                 A=input_fp8,
                 B=mat2_fp8,

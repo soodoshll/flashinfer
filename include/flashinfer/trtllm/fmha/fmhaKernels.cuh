@@ -55,8 +55,8 @@ using flashinfer::trtllm_cubin_loader::getCubin;
 // Check if two SM values are family/specific versions of the same architecture
 // Returns true only if one is a family version and the other is a compatible specific version
 constexpr bool isFamilySpecificSMPair(int sm1, int sm2) {
-  if ((sm1 == kSM_100f && (sm2 == kSM_100 || sm2 == kSM_103)) ||
-      (sm2 == kSM_100f && (sm1 == kSM_100 || sm1 == kSM_103))) {
+  if ((sm1 == kSM_100f && (sm2 == kSM_100 || sm2 == kSM_103 || sm2 == kSM_107)) ||
+      (sm2 == kSM_100f && (sm1 == kSM_100 || sm1 == kSM_103 || sm1 == kSM_107))) {
     return true;
   }
   return false;

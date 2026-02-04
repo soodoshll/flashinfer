@@ -74,6 +74,15 @@ except OSError as e:
     if not is_lib_missing:
         raise
 
+# Check for CuTe-DSL availability
+CUTE_DSL_AVAILABLE = False
+try:
+    from ..cute_dsl import is_cute_dsl_available
+
+    CUTE_DSL_AVAILABLE = is_cute_dsl_available()
+except ImportError:
+    pass
+
 
 from ..jit.cubin_loader import setup_cubin_loader
 from ..utils import (
@@ -183,7 +192,7 @@ def get_gemm_module():
     return _gemm_module
 
 
-@supported_compute_capability([100, 103])
+@supported_compute_capability([100, 103, 107])
 def _cutlass_mm_bf16_requirement(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -232,7 +241,7 @@ def _cudnn_mm_bf16_requirement(
     return True
 
 
-@supported_compute_capability([100, 103])
+@supported_compute_capability([100, 103, 107])
 def _tgv_gemm_requirement(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -426,7 +435,7 @@ def mm_bf16(
     return out
 
 
-@supported_compute_capability([100, 103])
+@supported_compute_capability([100, 103, 107])
 def _cutlass_bmm_bf16_requirement(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -922,6 +931,112 @@ def bf16_gemm_sm100(
     runner(inputs=inputs, tactic=tactic)
 
 
+def _cute_dsl_fp8_gemm_runner(arch: Literal["sm100", "sm107"]):
+    """Create a TunableRunner for CuTe-DSL FP8 GEMM.
+
+    This is the unified runner factory that supports both SM100 (Blackwell) and SM107 (Rubin).
+    Each tactic corresponds to an index into the architecture-specific AUTOTUNE_CONFIGS.
+
+    :param arch: Architecture identifier ("sm100" or "sm107")
+    :return: A TunableRunner instance for the specified architecture
+    """
+    # Import config functions based on architecture
+    if arch == "sm100":
+        from .kernels.bmm_fp8_wrapper import (
+            get_valid_sm100_configs as get_valid_configs,
+        )
+        from .kernels.bmm_fp8_wrapper import SM100_AUTOTUNE_CONFIGS as AUTOTUNE_CONFIGS
+    else:  # sm107
+        from .kernels.bmm_fp8_wrapper import (
+            get_valid_sm107_configs as get_valid_configs,
+        )
+        from .kernels.bmm_fp8_wrapper import SM107_AUTOTUNE_CONFIGS as AUTOTUNE_CONFIGS
+
+    class CuteDslFp8GemmRunner(TunableRunner):
+        def get_valid_tactics(
+            self,
+            inputs: List[torch.Tensor],
+            profile: OptimizationProfile,
+        ) -> List[int]:
+            """Return valid tactic indices for the given problem size.
+
+            Each tactic index corresponds to a configuration in AUTOTUNE_CONFIGS.
+            """
+            from ..cute_dsl.utils import torch_dtype_to_cutlass
+
+            a, b, scale_a, scale_b, out, workspace_buffer = inputs
+            batch, m, k = a.shape
+            _, _, n = out.shape
+
+            # Map torch dtype to cutlass dtype for validation
+            try:
+                ab_dtype = torch_dtype_to_cutlass(a.dtype)
+                c_dtype = torch_dtype_to_cutlass(out.dtype)
+            except TypeError:
+                # Skip this runner if dtype not recognized
+                return []
+
+            # Detect memory layout
+            def detect_major(tensor, dim_names):
+                strides = tensor.stride()
+                if strides[1] == 1:
+                    return dim_names[0]
+                elif strides[2] == 1:
+                    return dim_names[1]
+                else:
+                    return dim_names[1] if strides[1] >= strides[2] else dim_names[0]
+
+            a_major = detect_major(a, ("m", "k"))
+            b_major = detect_major(b, ("k", "n"))
+            c_major = "n"
+
+            valid_indices = get_valid_configs(
+                m, n, k, batch, ab_dtype, c_dtype, a_major, b_major, c_major
+            )
+
+            # Return valid tactics or empty list if none valid
+            # Returning [] tells autotuner to skip this runner for this problem size
+            # DO NOT return [0] as fallback - this causes kernel to run with invalid config
+            return list(valid_indices) if valid_indices else []
+
+        def forward(
+            self,
+            inputs: List[torch.Tensor],
+            tactic: int = -1,
+            do_preparation: bool = False,
+            **kwargs,
+        ) -> torch.Tensor:
+            """Execute the kernel with the specified tactic (config index)."""
+            from .kernels.bmm_fp8_wrapper import bmm_fp8_cute_dsl
+
+            a, b, scale_a, scale_b, out, workspace_buffer = inputs
+
+            # Use first config as fallback if tactic is -1 or invalid
+            if tactic < 0 or tactic >= len(AUTOTUNE_CONFIGS):
+                tactic = 0
+
+            # CuTe-DSL kernel handles the computation with scale fused into epilogue.
+            # The kernel natively supports Float16, BFloat16, and Float32 output.
+            # Scale is applied in Float32 precision inside the kernel's epilogue
+            # before the final dtype conversion.
+            bmm_fp8_cute_dsl(
+                a, b, scale_a, scale_b, out.dtype, out, config_index=tactic, arch=arch
+            )
+            return out
+
+    return CuteDslFp8GemmRunner()
+
+
+def _cute_dsl_fp8_gemm_runner_sm100():
+    """Create a TunableRunner for CuTe-DSL FP8 GEMM on SM100 (Blackwell)."""
+    return _cute_dsl_fp8_gemm_runner("sm100")
+
+
+def _cute_dsl_fp8_gemm_runner_sm107():
+    """Create a TunableRunner for CuTe-DSL FP8 GEMM on SM107 (Rubin)."""
+    return _cute_dsl_fp8_gemm_runner("sm107")
+
+
 def fp8_gemm_sm100(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -932,6 +1047,10 @@ def fp8_gemm_sm100(
     runner_names: List[str],
 ) -> None:
     runners = []
+    if "cute-dsl_sm100" in runner_names:
+        runners.append(_cute_dsl_fp8_gemm_runner_sm100())
+    if "cute-dsl_sm107" in runner_names:
+        runners.append(_cute_dsl_fp8_gemm_runner_sm107())
     if "cutlass_sm10x" in runner_names:
         runners.append(get_gemm_sm100_module_cutlass_fp8().cutlass_fp8_gemm_runner())
     if "cutlass_sm12x" in runner_names:
@@ -3954,6 +4073,42 @@ def _cutlass_bmm_fp8_requirement(
     return True
 
 
+@supported_compute_capability([100, 103, 107])
+def _cute_dsl_bmm_fp8_requirement(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    A_scale: torch.Tensor,
+    B_scale: torch.Tensor,
+    dtype: torch.dtype,
+    out: Optional[torch.Tensor] = None,
+    backend: Literal["cudnn", "cublas", "cutlass", "cute-dsl", "auto"] = "cublas",
+):
+    """Requirement check for CuTe-DSL FP8 BMM backend."""
+    if not CUTE_DSL_AVAILABLE:
+        raise ValueError(
+            "CuTe-DSL is not available. Please install cutlass with cute support."
+        )
+
+    # Check dimensions are 3D (batch, m, k) and (batch, k, n)
+    if A.dim() != 3 or B.dim() != 3:
+        raise ValueError("CuTe-DSL FP8 BMM requires 3D tensors")
+
+    # Check alignment (16-byte alignment for TMA)
+    batch, m, k = A.shape
+    _, _, n = B.shape
+    if m % 16 != 0 or n % 16 != 0 or k % 16 != 0:
+        raise ValueError("CuTe-DSL FP8 BMM requires dimensions to be multiples of 16")
+
+    # Blackwell/Rubin kernel requires A and B to have the same dtype
+    if A.dtype != B.dtype:
+        raise ValueError(
+            "CuTe-DSL FP8 BMM requires A and B to have the same dtype. "
+            f"Got A.dtype={A.dtype}, B.dtype={B.dtype}"
+        )
+
+    return True
+
+
 def _check_bmm_fp8_problem_size(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -3975,15 +4130,25 @@ def _heuristic_func_bmm_fp8(
     B_scale: torch.Tensor,
     dtype: torch.dtype,
     out: Optional[torch.Tensor] = None,
-    backend: Literal["cudnn", "cublas", "cutlass", "auto"] = "cublas",
+    backend: Literal["cudnn", "cublas", "cutlass", "cute-dsl", "auto"] = "cublas",
 ):
-    # No e5m2 for cutlass
+    # No e5m2 for cutlass (but cute-dsl supports it)
     is_e5m2 = A.dtype == torch.float8_e5m2 or B.dtype == torch.float8_e5m2
     is_sm_supported = _match_sm_version(A.device, ["100", "103", "107", "110"])
+    is_sm107_supported = _match_sm_version(A.device, ["107"])
     is_sm120_supported = _match_sm_version(A.device, ["120", "121"])
 
-    # preserve order of ["cudnn", "cublas", "cutlass"]
+    # Check if dimensions are aligned for cute-dsl (16-byte alignment)
+    batch, m, k = A.shape
+    _, _, n = B.shape
+    is_cute_dsl_aligned = (m % 16 == 0) and (n % 16 == 0) and (k % 16 == 0)
+    # Blackwell/Rubin kernel requires A and B to have the same dtype
+    is_cute_dsl_same_dtype = A.dtype == B.dtype
+
+    # preserve order of ["cutlass", "cublas", "cudnn", "cute-dsl"]
+    # cute-dsl is placed last as it's still experimental
     heuristic_backends = []
+
     if "cutlass" in suitable_backends and not is_e5m2:
         if is_sm_supported:
             heuristic_backends.append("cutlass_sm10x")
@@ -3994,6 +4159,20 @@ def _heuristic_func_bmm_fp8(
         heuristic_backends.append("cublas")
     if CUDNN_AVAILABLE and "cudnn" in suitable_backends:
         heuristic_backends.append("cudnn")
+
+    # CuTe-DSL backend is placed last (experimental)
+    # Note: CuTe-DSL supports both Float8E4M3FN and Float8E5M2, but requires same dtype
+    if (
+        CUTE_DSL_AVAILABLE
+        and "cute-dsl" in suitable_backends
+        and is_cute_dsl_aligned
+        and is_cute_dsl_same_dtype
+    ):
+        if is_sm107_supported:
+            heuristic_backends.append("cute-dsl_sm107")
+        elif is_sm_supported:
+            heuristic_backends.append("cute-dsl_sm100")
+
     return heuristic_backends
 
 
@@ -4002,6 +4181,7 @@ def _heuristic_func_bmm_fp8(
         "cudnn": _cudnn_bmm_fp8_requirement,
         "cublas": _cublas_bmm_fp8_requirement,
         "cutlass": _cutlass_bmm_fp8_requirement,
+        "cute-dsl": _cute_dsl_bmm_fp8_requirement,
     },
     common_check=_check_bmm_fp8_problem_size,
     heuristic_func=_heuristic_func_bmm_fp8,
@@ -4014,7 +4194,7 @@ def bmm_fp8(
     B_scale: torch.Tensor,
     dtype: torch.dtype,
     out: Optional[torch.Tensor] = None,
-    backend: Literal["cudnn", "cublas", "cutlass", "auto"] = "cublas",
+    backend: Literal["cudnn", "cublas", "cutlass", "cute-dsl", "auto"] = "cublas",
 ) -> torch.Tensor:
     r"""BMM FP8
 
@@ -4038,9 +4218,10 @@ def bmm_fp8(
     out: Optional[torch.Tensor]
         Out tensor, shape (b, m, n), bf16 or fp16, defaults to ``None``.
 
-    backend: Literal["cudnn", "cublas", "cutlass", "auto"]
+    backend: Literal["cudnn", "cublas", "cutlass", "cute-dsl", "auto"]
         The backend to use for the operation. Defaults to ``"cublas"``.
         ``"auto"`` allows selecting the best tactic from all available backends when autotune is enabled.
+        ``"cute-dsl"`` uses CuTe-DSL kernels optimized for SM100+ (Blackwell/Rubin) architectures.
 
     Returns
     -------
@@ -4088,6 +4269,10 @@ def bmm_fp8(
     elif backend == "cutlass":
         backends = _heuristic_func_bmm_fp8(
             ["cutlass"], A, B, A_scale, B_scale, dtype, out, backend
+        )
+    elif backend == "cute-dsl":
+        backends = _heuristic_func_bmm_fp8(
+            ["cute-dsl"], A, B, A_scale, B_scale, dtype, out, backend
         )
     elif backend == "cudnn" and CUDNN_AVAILABLE:
         backends = ["cudnn"]
@@ -5720,7 +5905,7 @@ def mxfp8_gemm_sm100(
     runner(inputs=inputs, tactic=tactic)
 
 
-@supported_compute_capability([100, 103])
+@supported_compute_capability([100, 103, 107])
 def _cudnn_bmm_mxfp8_requirement(
     A: torch.Tensor,
     B: torch.Tensor,

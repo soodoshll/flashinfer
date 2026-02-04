@@ -81,7 +81,7 @@ def test_blockscaled_gemm_python_interface(
     torch.manual_seed(42)
     device = torch.device("cuda:0")
     device_ver = torch.cuda.get_device_capability(device)
-    supported_device_vers = [(10, 0), (10, 3)]
+    supported_device_vers = [(10, 0), (10, 3), (10, 7)]
     if device_ver not in supported_device_vers:
         pytest.skip(
             f"Cute-dsl backend is only supported on {supported_device_vers}, skipping {device_ver}."
