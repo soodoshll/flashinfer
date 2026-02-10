@@ -1049,7 +1049,7 @@ class Sm100BlockScaledPersistentDenseGemmKernel:
         smem = utils.SmemAllocator()
         storage = smem.allocate(self.shared_storage)
 
-        tmem_dealloc_mbar_ptr = storage.tmem_dealloc_mbar_ptr
+        tmem_dealloc_mbar_ptr = storage.tmem_dealloc_mbar_ptr.ptr
         tmem_holding_buf = storage.tmem_holding_buf
 
         # Initialize mainloop ab_pipeline (barrier) and states
