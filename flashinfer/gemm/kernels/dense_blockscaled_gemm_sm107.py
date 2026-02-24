@@ -37,7 +37,6 @@ import cutlass
 import cutlass.cute as cute
 import cutlass.pipeline as pipeline
 import cutlass.utils as utils
-print(utils.__file__)
 import cutlass.utils.blackwell_helpers as sm100_utils
 import cutlass.utils.blockscaled_layout as blockscaled_utils
 import cutlass.utils.gemm.sm100 as epilogue_sm100
@@ -935,7 +934,8 @@ class Sm107BlockScaledPersistentDenseGemmKernel:
         gc = cute.zipped_divide(c, tiler=c_shape)
         num_ctas_mnl = gc[(0, (None, None, None))].shape
         cluster_shape_mnl = (*cluster_shape_mn, 1)
-
+        
+        print(f"files: {utils.PersistentTileSchedulerParams.__file__}")
         tile_sched_params = utils.PersistentTileSchedulerParams(
             num_ctas_mnl, cluster_shape_mnl, raster_along_m=True,
         )
