@@ -935,7 +935,7 @@ class Sm107BlockScaledPersistentDenseGemmKernel:
         num_ctas_mnl = gc[(0, (None, None, None))].shape
         cluster_shape_mnl = (*cluster_shape_mn, 1)
         
-        print(f"files: {utils.PersistentTileSchedulerParams.__file__}")
+        print(f"files: {utils.__file__}")
         tile_sched_params = utils.PersistentTileSchedulerParams(
             num_ctas_mnl, cluster_shape_mnl, raster_along_m=True,
         )
