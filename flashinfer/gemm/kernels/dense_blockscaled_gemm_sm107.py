@@ -935,7 +935,15 @@ class Sm107BlockScaledPersistentDenseGemmKernel:
         num_ctas_mnl = gc[(0, (None, None, None))].shape
         cluster_shape_mnl = (*cluster_shape_mn, 1)
 
-        tile_sched_params = utils.PersistentTileSchedulerParams(num_ctas_mnl, cluster_shape_mnl)
+        tile_sched_params = utils.PersistentTileSchedulerParams(
+            num_ctas_mnl, cluster_shape_mnl, raster_along_m=True,
+        )
+        # # Workaround for cutlass-dsl versions where __init__ stores _raster_along_m
+        # # (private) but __extract_mlir_values__ reads raster_along_m (public).
+        # if not hasattr(tile_sched_params, "raster_along_m") and hasattr(
+        #     tile_sched_params, "_raster_along_m"
+        # ):
+        #     tile_sched_params.raster_along_m = tile_sched_params._raster_along_m
         grid = utils.StaticPersistentTileScheduler.get_grid_shape(tile_sched_params, max_active_clusters)
 
         return tile_sched_params, grid
