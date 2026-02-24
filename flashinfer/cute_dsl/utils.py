@@ -16,7 +16,6 @@ limitations under the License.
 
 import ctypes
 import functools
-import importlib.util
 from typing import Union, Tuple
 
 import cutlass

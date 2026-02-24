@@ -3250,7 +3250,7 @@ def _cutlass_gemm_fp4_requirement(
     return True
 
 
-@supported_compute_capability([100, 103])
+@supported_compute_capability([100, 103, 107])
 def _cute_dsl_gemm_fp4_requirement(
     a: torch.Tensor,  # unused
     b: torch.Tensor,  # unused
@@ -3327,6 +3327,17 @@ def _cute_dsl_gemm_fp4_runner(
     #         Sm103Kernel = Sm103BlockScaledPersistentDenseGemmKernel
     #     except ImportError:
     #         pass
+
+    Sm107Kernel = None
+    if sm_version == 107:
+        try:
+            from .kernels.dense_blockscaled_gemm_sm107 import (
+                Sm107BlockScaledPersistentDenseGemmKernel,
+            )
+
+            Sm107Kernel = Sm107BlockScaledPersistentDenseGemmKernel
+        except ImportError:
+            pass
 
     # Map torch output dtype to cutlass dtype
     _torch_to_cutlass_dtype = {
@@ -3526,6 +3537,78 @@ def _cute_dsl_gemm_fp4_runner(
                                         )
                                     )
 
+            # --- SM107 tactics (only on SM107) ---
+            if sm_version == 107 and Sm107Kernel is not None:
+                sm107_mma_tiler_mn_candidates = [
+                    (128, 64),
+                    (256, 64),
+                    (128, 128),
+                    (256, 128),
+                    (128, 192),
+                    (256, 192),
+                    (128, 256),
+                    (256, 256),
+                ]
+                sm107_mma_inst_shape_m_candidates = [128, 256]
+
+                for mma_tiler_mn in sm107_mma_tiler_mn_candidates:
+                    for mma_inst_shape_m in sm107_mma_inst_shape_m_candidates:
+                        mma_inst_shape_k = 128  # fixed for FP4
+                        mma_tiler_k = 256  # fixed for FP4
+                        mma_inst_shape = (
+                            mma_inst_shape_m,
+                            mma_tiler_mn[1],
+                            mma_inst_shape_k,
+                        )
+
+                        for cluster_shape_mn in cluster_shape_mn_candidates:
+                            for swap_ab in swap_ab_candidates:
+                                if not swap_ab and not n_aligned:
+                                    continue
+                                if swap_ab and not m_aligned:
+                                    continue
+
+                                if swap_ab:
+                                    c_major = "m"
+                                    kernel_m, kernel_n = n, m
+                                else:
+                                    c_major = "n"
+                                    kernel_m, kernel_n = m, n
+
+                                if not Sm107Kernel.can_implement(
+                                    ab_dtype,
+                                    sf_dtype,
+                                    sf_vec_size,
+                                    c_cutlass_dtype,
+                                    mma_tiler_mn,
+                                    mma_inst_shape,
+                                    cluster_shape_mn,
+                                    kernel_m,
+                                    kernel_n,
+                                    real_k,
+                                    batch_size,
+                                    "k",
+                                    "k",
+                                    c_major,
+                                ):
+                                    continue
+
+                                valid_tactics.append(
+                                    (  # type: ignore[arg-type]
+                                        mma_tiler_mn,
+                                        cluster_shape_mn,
+                                        swap_ab,
+                                        False,  # no prefetch for SM107
+                                        "sm107",
+                                        (
+                                            mma_inst_shape_m,
+                                            mma_tiler_mn[1],
+                                            mma_inst_shape_k,
+                                            mma_tiler_k,
+                                        ),
+                                    )
+                                )
+
             return valid_tactics
 
         def forward(
@@ -3545,8 +3628,17 @@ def _cute_dsl_gemm_fp4_runner(
             batch_size = 1
 
             if tactic is None or tactic == -1:
-                # Fallback tactic
-                tactic = ((128, 128), (1, 1), False, False, "sm100", None)
+                if sm_version == 107 and Sm107Kernel is not None:
+                    tactic = (
+                        (128, 128),
+                        (1, 1),
+                        False,
+                        False,
+                        "sm107",
+                        (128, 128, 128, 256),
+                    )
+                else:
+                    tactic = ((128, 128), (1, 1), False, False, "sm100", None)
 
             (
                 mma_tiler_mn,
@@ -3588,7 +3680,17 @@ def _cute_dsl_gemm_fp4_runner(
 
             if cache_key not in _CUTE_DSL_MM_FP4_KERNEL_CACHE:
                 # Create kernel instance
-                if kernel_type == "sm103" and Sm103Kernel is not None:
+                if kernel_type == "sm107" and Sm107Kernel is not None:
+                    sm107_params = (
+                        use_tma_store  # repurposed: (inst_m, inst_n, inst_k, tiler_k)
+                    )
+                    gemm = Sm107Kernel(
+                        sf_vec_size,
+                        (sm107_params[0], sm107_params[1], sm107_params[2]),
+                        (mma_tiler_mn[0], mma_tiler_mn[1], sm107_params[3]),
+                        cluster_shape_mn,
+                    )
+                elif kernel_type == "sm103" and Sm103Kernel is not None:
                     gemm = Sm103Kernel(  # type: ignore[assignment]
                         sf_vec_size,
                         mma_tiler_mn,
@@ -3760,23 +3862,21 @@ def _heuristic_func_mm_fp4(
 
     """
     cuda_major = get_cuda_version().major
-    # Get compute capability to distinguish between SM100 (10.0) and SM103 (10.3)
     major, minor = get_compute_capability(a.device)
     is_sm103 = major == 10 and minor == 3
+    is_sm107 = major == 10 and minor == 7
 
-    # If cuda version is 13 or greater and cudnn version is 9.15 or greater:
-    # On SM103 (B300), cutlass is more performant than cudnn.
-    # On SM100 (B200), cudnn is more performant than cutlass.
-    if CUDNN_AVAILABLE and cuda_major >= 13 and cudnn.backend_version() >= 91500:
+    candidate_backends: Tuple[str, ...]
+    if is_sm107:
+        candidate_backends = ("cute-dsl", "cutlass", "cudnn")
+    elif CUDNN_AVAILABLE and cuda_major >= 13 and cudnn.backend_version() >= 91500:
         if is_sm103:
             candidate_backends = ("cutlass", "cudnn")
         else:
             candidate_backends = ("cudnn", "cutlass")
-    # Otherwise, prioritize cutlass
     else:
         candidate_backends = ("cutlass", "cudnn")
 
-    # Filter and return only supported backends
     return [c for c in candidate_backends if c in suitable_backends]
 
 
