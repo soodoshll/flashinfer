@@ -41,6 +41,7 @@ import cutlass.utils.blackwell_helpers as sm100_utils
 import cutlass.utils.blockscaled_layout as blockscaled_utils
 import cutlass.utils.gemm.sm100 as epilogue_sm100
 import cutlass.utils.rubin_helpers as sm107_utils
+from flashinfer.gemm.kernels.epilogue_utils import epilogue_tma_store_with_alpha
 from cutlass.cute.nvgpu import cpasync, tcgen05
 from cutlass.cute.nvgpu.tcgen05.mma import CollectorOp
 from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
@@ -1241,10 +1242,6 @@ class Sm107BlockScaledPersistentDenseGemmKernel:
                 num_stages=self.num_c_stage, producer_group=c_producer_group
             )
 
-            alpha_epilogue_op = lambda x: epilogue_op(
-                (alpha_value * x.to(cutlass.Float32)).to(self.c_dtype)
-            )
-
             while work_tile.is_valid_tile:
                 cur_tile_coord = work_tile.tile_idx
                 mma_tile_coord_mnl = (
@@ -1256,7 +1253,7 @@ class Sm107BlockScaledPersistentDenseGemmKernel:
                 tile_sched.advance_to_next_work()
                 work_tile = tile_sched.get_current_work()
                 num_tiles_executed = tile_sched.num_tiles_executed
-                acc_consumer_state = epilogue_sm100.epilogue_tma_store(
+                acc_consumer_state = epilogue_tma_store_with_alpha(
                     self,
                     tidx,
                     warp_idx,
@@ -1266,7 +1263,8 @@ class Sm107BlockScaledPersistentDenseGemmKernel:
                     tCgC,
                     epi_tile,
                     num_tiles_executed,
-                    alpha_epilogue_op,
+                    epilogue_op,
+                    alpha_value,
                     mma_tile_coord_mnl,
                     acc_consumer_state,
                     acc_pipeline,

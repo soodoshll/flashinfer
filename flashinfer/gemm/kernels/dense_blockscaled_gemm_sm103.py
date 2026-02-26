@@ -44,6 +44,10 @@ from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
 import cutlass.utils.blackwell_helpers as sm103_utils
 import cutlass.utils.blockscaled_layout as blockscaled_utils
 from cutlass.cute.arch import griddepcontrol_launch_dependents, griddepcontrol_wait
+from flashinfer.gemm.kernels.epilogue_utils import (
+    epilogue_tma_store_with_alpha,
+    epilogue_with_alpha,
+)
 
 
 class Sm103BlockScaledPersistentDenseGemmKernel:
@@ -1572,10 +1576,6 @@ class Sm103BlockScaledPersistentDenseGemmKernel:
                 c_pipeline = pipeline.PipelineTmaStore.create(
                     num_stages=self.num_c_stage, producer_group=c_producer_group
                 )
-            # Wrap epilogue_op with alpha scaling
-            alpha_epilogue_op = lambda x: epilogue_op(
-                (alpha_value * x.to(cutlass.Float32)).to(self.c_dtype)
-            )
             while work_tile.is_valid_tile:
                 # Get tile coord from tile scheduler
                 cur_tile_coord = work_tile.tile_idx
@@ -1591,7 +1591,7 @@ class Sm103BlockScaledPersistentDenseGemmKernel:
                 work_tile = tile_sched.get_current_work()
                 num_tiles_executed = tile_sched.num_tiles_executed
                 if cutlass.const_expr(self.use_tma_store):
-                    acc_consumer_state = utils.gemm.sm100.epilogue_tma_store(
+                    acc_consumer_state = epilogue_tma_store_with_alpha(
                         self,
                         tidx,
                         warp_idx,
@@ -1601,20 +1601,22 @@ class Sm103BlockScaledPersistentDenseGemmKernel:
                         tCgC,
                         epi_tile,
                         num_tiles_executed,
-                        alpha_epilogue_op,
+                        epilogue_op,
+                        alpha_value,
                         mma_tile_coord_mnl,
                         acc_consumer_state,
                         acc_pipeline,
                         c_pipeline,
                     )
                 else:
-                    acc_consumer_state = utils.gemm.sm100.epilogue(
+                    acc_consumer_state = epilogue_with_alpha(
                         self,
                         tidx,
                         tCtAcc_base,
                         tCgC,
                         epi_tile,
-                        alpha_epilogue_op,
+                        epilogue_op,
+                        alpha_value,
                         mma_tile_coord_mnl,
                         acc_consumer_state,
                         acc_pipeline,
