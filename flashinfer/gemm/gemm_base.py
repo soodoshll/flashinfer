@@ -3301,6 +3301,7 @@ def _cute_dsl_gemm_fp4_runner(
 
     On SM100: uses the SM100 kernel only.
     On SM103: uses both SM100 kernel and the SM103-specific 3xFP4 kernel.
+    On SM107: uses all SM100, SM103 and SM107 kernels.
     The autotuner selects the best (kernel_type, tile, cluster, swap_ab, prefetch,
     use_tma_store) combination.
     """
@@ -3318,15 +3319,15 @@ def _cute_dsl_gemm_fp4_runner(
     # SM103MmaMXF4Op and compatible PersistentTileSchedulerParams.
     # To re-enable, remove the `Sm103Kernel = None` line below.
     Sm103Kernel = None
-    # if sm_version == 103:
-    #     try:
-    #         from .kernels.dense_blockscaled_gemm_sm103 import (
-    #             Sm103BlockScaledPersistentDenseGemmKernel,
-    #         )
-    #
-    #         Sm103Kernel = Sm103BlockScaledPersistentDenseGemmKernel
-    #     except ImportError:
-    #         pass
+    if sm_version in [103, 107]:
+        try:
+            from .kernels.dense_blockscaled_gemm_sm103 import (
+                Sm103BlockScaledPersistentDenseGemmKernel,
+            )
+
+            Sm103Kernel = Sm103BlockScaledPersistentDenseGemmKernel
+        except ImportError:
+            pass
 
     Sm107Kernel = None
     if sm_version == 107:
@@ -3627,6 +3628,8 @@ def _cute_dsl_gemm_fp4_runner(
             sf_vec_size = 16
             batch_size = 1
 
+            # sm100 and sm103 uses default sm100 kernel
+            # sm107 uses default sm107 kernel
             if tactic is None or tactic == -1:
                 if sm_version == 107 and Sm107Kernel is not None:
                     tactic = (
@@ -3862,21 +3865,26 @@ def _heuristic_func_mm_fp4(
 
     """
     cuda_major = get_cuda_version().major
+    # Get compute capability to distinguish between SM100 (10.0) and SM103 (10.3)
     major, minor = get_compute_capability(a.device)
+    is_sm10x = major == 10
     is_sm103 = major == 10 and minor == 3
-    is_sm107 = major == 10 and minor == 7
 
     candidate_backends: Tuple[str, ...]
-    if is_sm107:
-        candidate_backends = ("cute-dsl", "cutlass", "cudnn")
-    elif CUDNN_AVAILABLE and cuda_major >= 13 and cudnn.backend_version() >= 91500:
+    # If cuda version is 13 or greater and cudnn version is 9.15 or greater:
+    # On SM103 (B300), cutlass is more performant than cudnn.
+    # On SM100 (B200), cudnn is more performant than cutlass.
+    if CUDNN_AVAILABLE and cuda_major >= 13 and cudnn.backend_version() >= 91500:
         if is_sm103:
-            candidate_backends = ("cutlass", "cudnn")
+            candidate_backends = ("cutlass", "cudnn", "cute-dsl")
         else:
-            candidate_backends = ("cudnn", "cutlass")
+            candidate_backends = ("cudnn", "cutlass", "cute-dsl")
+    # Otherwise, prioritize cutlass
+    elif is_sm10x:
+        candidate_backends = ("cutlass", "cudnn", "cute-dsl")
     else:
         candidate_backends = ("cutlass", "cudnn")
-
+    # Filter and return only supported backends
     return [c for c in candidate_backends if c in suitable_backends]
 
 
