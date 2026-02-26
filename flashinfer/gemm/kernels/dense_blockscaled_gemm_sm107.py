@@ -1241,7 +1241,9 @@ class Sm107BlockScaledPersistentDenseGemmKernel:
                 num_stages=self.num_c_stage, producer_group=c_producer_group
             )
 
-            alpha_epilogue_op = lambda x: epilogue_op(alpha_value * x)
+            alpha_epilogue_op = lambda x: epilogue_op(
+                (alpha_value * x.to(cutlass.Float32)).to(self.c_dtype)
+            )
 
             while work_tile.is_valid_tile:
                 cur_tile_coord = work_tile.tile_idx
