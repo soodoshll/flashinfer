@@ -641,14 +641,10 @@ def epilogue_with_alpha(
         cC_epi = cute.flat_divide(tCcC, epi_tile)
         tTR_cC_partitioned = thr_copy_t2r.partition_D(cC_epi)
 
-    tTR_gC = tTR_gC_partitioned[
-        (None, None, None, None, None, *mma_tile_coord_mnl)
-    ]
+    tTR_gC = tTR_gC_partitioned[(None, None, None, None, None, *mma_tile_coord_mnl)]
 
     if const_expr(use_predication):
-        tTR_cC = tTR_cC_partitioned[
-            (None, None, None, None, None, *mma_tile_coord_mnl)
-        ]
+        tTR_cC = tTR_cC_partitioned[(None, None, None, None, None, *mma_tile_coord_mnl)]
         tTR_cC = cute.group_modes(tTR_cC, 3, cute.rank(tTR_cC))
 
     if const_expr(overlapping_accum):

@@ -39,7 +39,6 @@ import cutlass.pipeline as pipeline
 import cutlass.utils as utils
 import cutlass.utils.blackwell_helpers as sm100_utils
 import cutlass.utils.blockscaled_layout as blockscaled_utils
-import cutlass.utils.gemm.sm100 as epilogue_sm100
 import cutlass.utils.rubin_helpers as sm107_utils
 from flashinfer.gemm.kernels.epilogue_utils import epilogue_tma_store_with_alpha
 from cutlass.cute.nvgpu import cpasync, tcgen05
