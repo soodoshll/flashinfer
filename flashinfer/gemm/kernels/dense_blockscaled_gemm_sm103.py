@@ -1836,7 +1836,9 @@ class Sm103BlockScaledPersistentDenseGemmKernel:
         """
 
         sf_vec_size: int
-        major_mode: tcgen05.OperandMajorMode = tcgen05.OperandMajorMode.K
+        major_mode: tcgen05.OperandMajorMode = field(
+            default_factory=lambda: tcgen05.OperandMajorMode.K
+        )
         _layout: cute.Layout = field(init=False, repr=False)
 
         def __post_init__(self) -> None:
