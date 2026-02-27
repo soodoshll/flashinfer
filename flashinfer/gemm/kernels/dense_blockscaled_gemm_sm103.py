@@ -1836,9 +1836,7 @@ class Sm103BlockScaledPersistentDenseGemmKernel:
         """
 
         sf_vec_size: int
-        major_mode: OperandMajorMode = field(
-            default_factory=lambda: OperandMajorMode.K
-        )
+        major_mode: OperandMajorMode = field(default_factory=lambda: OperandMajorMode.K)
         _layout: cute.Layout = field(init=False, repr=False)
 
         def __post_init__(self) -> None:
