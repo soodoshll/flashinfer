@@ -55,7 +55,6 @@ from cutlass.cutlass_dsl import (
 )
 from cutlass._mlir.dialects import llvm
 from flashinfer.utils import get_compute_capability
-from flashinfer.api_logging import flashinfer_api
 from cutlass.utils.static_persistent_tile_scheduler import WorkTileInfo
 from flashinfer.cute_dsl.utils import (
     get_cutlass_dtype,
@@ -2951,8 +2950,7 @@ def get_cute_dsl_compiled_masked_gemm_kernel(
     return tensor_api
 
 
-@flashinfer_api
-def grouped_gemm_nt_masked(
+def _grouped_gemm_nt_masked_sm100(
     lhs: Tuple[torch.Tensor, torch.Tensor],
     rhs: Tuple[torch.Tensor, torch.Tensor],
     out: torch.Tensor,
@@ -2967,37 +2965,10 @@ def grouped_gemm_nt_masked(
     **kwargs,
 ):
     """
-    Executes a masked, batched matrix multiplication (GEMM) with scale factors and optional alpha scaling at output.
+    SM100/SM103 (Blackwell) implementation of masked grouped GEMM.
 
-    Args:
-        lhs (Tuple[torch.Tensor, torch.Tensor]): Tuple containing the left-hand side input tensor (A) and its scale factor tensor (SFA).
-            - A should be in (m, k, l) order, but physically (l, m, k). For fp4 tensor with 8-bit storage, we expect the shape to be (m, k/2, l).
-            - SFA should be in (m32, m4, rm, k4, rk, l) order, but physically (l, rm, rk, m32, m4, k4)
-        rhs (Tuple[torch.Tensor, torch.Tensor]): Tuple containing the right-hand side input tensor (B) and its scale factor tensor (SFB).
-            - B should be in (n, k, l) order, but physically (l, n, k). For fp4 tensor with 8-bit storage, we expect the shape to be (n, k/2, l).
-            - SFB should be in (n32, n4, rn, k4, rk, l) order, but physically (l, rn, rk, n32, n4, k4)
-        out (torch.Tensor): Output tensor to store the result, with shape (l, m, n).
-        masked_m (torch.Tensor): 1D tensor of shape (l,) specifying the valid row count for each batch (used for masking).
-        ab_dtype (str): Data type for A and B matrices. Supported: "float4_e2m1fn", "float8_e4m3fn", "float8_e5m2".
-        sf_dtype (str): Data type for scale factors. Supported: "float8_e8m0fnu", "float8_e4m3fn".
-        c_dtype (str): Data type for output matrix C. Supported: "float16", "bfloat16", "float32", "float8_e4m3fn", "float8_e5m2".
-        sf_vec_size (int): Vector size for scale factors. Typically 16 or 32.
-        sm_count (int, optional): Number of SMs to use. Default: max available SMs under the CTA configuration.
-        mma_tiler_mn (Tuple[int, int], optional): Shape of the MMA tiler (M, N). Default: (128, 128).
-        cluster_shape_mn (Tuple[int, int], optional): Shape of the CTA cluster (ClusterM, ClusterN). Default: (1, 1).
-        alpha_dtype (str, optional): Data type for alpha scaling factors.
-        alpha (torch.Tensor, optional): Optional 1D tensor of shape (l,) containing per-batch scaling factors. Perform per-batch scaling out = alpha * out.
-
-    Notes:
-        - Legends of the input tensors:
-            * `l` is the batch size, `m/n` is the number of rows, and `k` is the number of columns.
-            * `m/n32`, `m/n4`, `k4` are constant values 32, 4, 4 respectively.
-            * `m32 * m4 * rm` should be same as `M`, which is `m` padded up to the nearest multiple of 128.
-            * `n32 * n4 * rn` should be same as `N`, which is `n` padded up to the nearest multiple of 128.
-            * `k4 * rk` should be same as `K`, which is `k / sf_vec_size` padded up to the nearest multiple of 4.
-        - The function applies masking per batch using masked_m.
-        - If alpha is provided, each batch output is multiplied by its corresponding alpha value. out = alpha * (A @ B).
-        - The result is written to c_tensor.
+    This is the arch-specific implementation; use ``grouped_gemm_nt_masked``
+    from ``grouped_gemm_masked_wrapper`` as the public entry point.
     """
 
     a_torch, sfa_torch = lhs
