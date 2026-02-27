@@ -3482,7 +3482,7 @@ def _cute_dsl_gemm_fp4_runner(
                             )
 
             # --- SM103 tactics (only on SM103) ---
-            if sm_version == 103 and Sm103Kernel is not None:
+            if sm_version in [103, 107] and Sm103Kernel is not None:
                 sm103_mma_tiler_candidates = [
                     (128, 128),
                     (256, 128),
