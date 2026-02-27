@@ -3654,9 +3654,11 @@ def _cute_dsl_gemm_fp4_runner(
 
             if swap_ab:
                 kernel_m, kernel_n = n, m
-                # Swap A/B tensors and their scale factors
-                kernel_a, kernel_b = b.T, a.T
-                kernel_a_sf, kernel_b_sf = b_descale.T, a_descale.T
+                # Swap A/B tensors and their scale factors.
+                # b is (k_packed, n), needs transposing to (n, k_packed) for kernel_a.
+                # a is already (m, k_packed), passed directly as kernel_b (no transpose).
+                kernel_a, kernel_b = b.T, a
+                kernel_a_sf, kernel_b_sf = b_descale.T, a_descale
             else:
                 kernel_m, kernel_n = m, n
                 # b comes in as (k_packed, n), need (n, k_packed) for the kernel

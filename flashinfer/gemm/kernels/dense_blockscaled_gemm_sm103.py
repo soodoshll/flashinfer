@@ -37,7 +37,7 @@ import cuda.bindings.driver as cuda
 
 import cutlass
 import cutlass.cute as cute
-from cutlass.cute.nvgpu import cpasync, tcgen05
+from cutlass.cute.nvgpu import cpasync, tcgen05, OperandMajorMode
 import cutlass.utils as utils
 import cutlass.pipeline as pipeline
 from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
@@ -719,7 +719,7 @@ class Sm103BlockScaledPersistentDenseGemmKernel:
             barrier_for_retrieve=tmem_alloc_barrier,
             allocator_warp_id=self.epilogue_warp_id[0],
             is_two_cta=use_2cta_instrs,
-            two_cta_tmem_dealloc_mbar_ptr=storage.tmem_dealloc_mbar_ptr,
+            two_cta_tmem_dealloc_mbar_ptr=storage.tmem_dealloc_mbar_ptr.ptr,
         )
 
         # Cluster arrive after barrier init
@@ -1769,7 +1769,7 @@ class Sm103BlockScaledPersistentDenseGemmKernel:
         :return: SMEM layout for operand A
         :rtype: cute.Layout
         """
-        is_k_major = tiled_mma.op.a_major_mode == tcgen05.OperandMajorMode.K
+        is_k_major = tiled_mma.op.a_major_mode == OperandMajorMode.K
         a_smem_layout_staged = tcgen05.tile_to_mma_shape(
             tcgen05.make_smem_layout_atom(
                 tcgen05.SmemLayoutAtomKind.K_SW128, cutlass.Uint8
@@ -1812,7 +1812,7 @@ class Sm103BlockScaledPersistentDenseGemmKernel:
         :return: SMEM layout for operand B
         :rtype: cute.Layout
         """
-        is_k_major = tiled_mma.op.b_major_mode == tcgen05.OperandMajorMode.K
+        is_k_major = tiled_mma.op.b_major_mode == OperandMajorMode.K
         b_smem_layout_staged = tcgen05.tile_to_mma_shape(
             tcgen05.make_smem_layout_atom(
                 tcgen05.SmemLayoutAtomKind.K_SW128, cutlass.Uint8
@@ -1836,13 +1836,13 @@ class Sm103BlockScaledPersistentDenseGemmKernel:
         """
 
         sf_vec_size: int
-        major_mode: tcgen05.OperandMajorMode = field(
-            default_factory=lambda: tcgen05.OperandMajorMode.K
+        major_mode: OperandMajorMode = field(
+            default_factory=lambda: OperandMajorMode.K
         )
         _layout: cute.Layout = field(init=False, repr=False)
 
         def __post_init__(self) -> None:
-            if self.major_mode == tcgen05.OperandMajorMode.K:
+            if self.major_mode == OperandMajorMode.K:
                 atom_shape = ((8, 4, 4), (self.sf_vec_size, 4))
                 atom_stride = ((16, 128, 4), (0, 1))
             else:
