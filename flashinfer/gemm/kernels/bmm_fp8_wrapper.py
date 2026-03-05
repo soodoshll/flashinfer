@@ -12,7 +12,7 @@ using CuTe-DSL kernels, supporting both Blackwell (SM100) and Rubin (SM107) arch
 
 It handles:
 - Autotuning configuration spaces (SM100_AUTOTUNE_CONFIGS, SM107_AUTOTUNE_CONFIGS)
-- Kernel compilation and caching with symbolic M dimension
+- Kernel compilation and caching with symbolic M, N, K dimensions
 - Configuration validation for different problem sizes
 - Entry points for both default and autotuned execution
 """
@@ -134,19 +134,17 @@ def _get_stride_order(major: str, tensor_type: str) -> Tuple[int, int, int]:
 
 def _create_fake_tensors(
     batch: int,
-    n: int,
-    k: int,
     ab_dtype: Type[cutlass.Numeric],
     c_dtype: Type[cutlass.Numeric],
     a_major: str,
     b_major: str,
     c_major: str,
 ) -> Tuple:
-    """Create fake tensors with symbolic M dimension for kernel compilation.
+    """Create fake tensors with symbolic M, N, K dimensions for kernel compilation.
 
-    The M dimension is symbolic, allowing a single compiled kernel to handle
-    any M value at runtime. This is important for LLM inference where M (sequence
-    length) varies per request while N and K (model dimensions) are fixed.
+    The M, N, and K dimensions are symbolic, allowing a single compiled kernel to
+    handle any M, N, K values at runtime. This is important for LLM inference where
+    M (sequence length) varies per request and avoids recompilation when N or K change.
 
     :return: Tuple of (a_fake, b_fake, c_fake, scale_fake, stream_fake)
     """
@@ -154,24 +152,26 @@ def _create_fake_tensors(
     b_stride_order = _get_stride_order(b_major, "b")
     c_stride_order = _get_stride_order(c_major, "c")
 
-    # Use symbolic M dimension - allows single kernel to handle any M at runtime
+    # Use symbolic M, N, K dimensions - allows single kernel to handle any size at runtime
     sym_m = cute.sym_int()
+    sym_n = cute.sym_int()
+    sym_k = cute.sym_int()
 
     a_fake = cute.runtime.make_fake_compact_tensor(
         ab_dtype,
-        (batch, sym_m, k),
+        (batch, sym_m, sym_k),
         stride_order=a_stride_order,
         assumed_align=16,
     )
     b_fake = cute.runtime.make_fake_compact_tensor(
         ab_dtype,
-        (batch, k, n),
+        (batch, sym_k, sym_n),
         stride_order=b_stride_order,
         assumed_align=16,
     )
     c_fake = cute.runtime.make_fake_compact_tensor(
         c_dtype,
-        (batch, sym_m, n),
+        (batch, sym_m, sym_n),
         stride_order=c_stride_order,
         assumed_align=16,
     )
@@ -248,8 +248,6 @@ def _compile_and_create_tensor_api(
 
 @functools.cache
 def _get_compiled_bmm_sm100(
-    n: int,
-    k: int,
     batch: int,
     ab_dtype: Type[cutlass.Numeric],
     c_dtype: Type[cutlass.Numeric],
@@ -270,7 +268,7 @@ def _get_compiled_bmm_sm100(
     per-call tensor wrapping overhead.
     """
     a_fake, b_fake, c_fake, scale_fake, stream_fake = _create_fake_tensors(
-        batch, n, k, ab_dtype, c_dtype, a_major, b_major, c_major
+        batch, ab_dtype, c_dtype, a_major, b_major, c_major
     )
 
     gemm = PersistentDenseGemmKernel(
@@ -290,8 +288,6 @@ def _get_compiled_bmm_sm100(
 
 @functools.cache
 def _get_compiled_bmm_sm107(
-    n: int,
-    k: int,
     batch: int,
     ab_dtype: Type[cutlass.Numeric],
     c_dtype: Type[cutlass.Numeric],
@@ -313,7 +309,7 @@ def _get_compiled_bmm_sm107(
     per-call tensor wrapping overhead.
     """
     a_fake, b_fake, c_fake, scale_fake, stream_fake = _create_fake_tensors(
-        batch, n, k, ab_dtype, c_dtype, a_major, b_major, c_major
+        batch, ab_dtype, c_dtype, a_major, b_major, c_major
     )
 
     gemm = SM107PersistentDenseGemmKernel(
@@ -362,14 +358,11 @@ def _compile_and_run_bmm_sm100(
                                 Using a tensor avoids host-device sync for CUDA graph compatibility.
     """
     batch, m, k = a_tensor.shape
-    _, _, n = c_tensor.shape
 
-    # Get cached compiled kernel (M is symbolic - kernel handles any M at runtime)
-    # Only N, K, batch, dtypes, layouts, and config params are in the cache key
+    # Get cached compiled kernel (M, N, K are symbolic - kernel handles any size at runtime)
+    # Only batch, dtypes, layouts, and config params are in the cache key
     # Note: cutlass types are hashable but mypy doesn't recognize this
     tensor_api = _get_compiled_bmm_sm100(
-        n,
-        k,
         batch,
         ab_dtype,  # type: ignore[arg-type]
         c_dtype,  # type: ignore[arg-type]
@@ -385,7 +378,7 @@ def _compile_and_run_bmm_sm100(
         raster_along,
     )
     # Run kernel - tensors passed directly via TVM-FFI
-    # Actual M dimension is determined at runtime from tensor shapes
+    # Actual M, N, K dimensions are determined at runtime from tensor shapes
     tensor_api(a_tensor, b_tensor, c_tensor, output_scale_tensor)
 
 
@@ -415,14 +408,11 @@ def _compile_and_run_bmm_sm107(
                                 Using a tensor avoids host-device sync for CUDA graph compatibility.
     """
     batch, m, k = a_tensor.shape
-    _, _, n = c_tensor.shape
 
-    # Get cached compiled kernel (M is symbolic - kernel handles any M at runtime)
-    # Only N, K, batch, dtypes, layouts, and config params are in the cache key
+    # Get cached compiled kernel (M, N, K are symbolic - kernel handles any size at runtime)
+    # Only batch, dtypes, layouts, and config params are in the cache key
     # Note: cutlass types are hashable but mypy doesn't recognize this
     tensor_api = _get_compiled_bmm_sm107(
-        n,
-        k,
         batch,
         ab_dtype,  # type: ignore[arg-type]
         c_dtype,  # type: ignore[arg-type]
@@ -440,7 +430,7 @@ def _compile_and_run_bmm_sm107(
     )
 
     # Run kernel - tensors passed directly via TVM-FFI
-    # Actual M dimension is determined at runtime from tensor shapes
+    # Actual M, N, K dimensions are determined at runtime from tensor shapes
     tensor_api(a_tensor, b_tensor, c_tensor, output_scale_tensor)
 
 
