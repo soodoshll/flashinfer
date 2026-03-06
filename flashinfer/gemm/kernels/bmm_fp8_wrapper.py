@@ -133,7 +133,6 @@ def _get_stride_order(major: str, tensor_type: str) -> Tuple[int, int, int]:
 
 
 def _create_fake_tensors(
-    batch: int,
     ab_dtype: Type[cutlass.Numeric],
     c_dtype: Type[cutlass.Numeric],
     a_major: str,
@@ -156,22 +155,23 @@ def _create_fake_tensors(
     sym_m = cute.sym_int()
     sym_n = cute.sym_int()
     sym_k = cute.sym_int()
+    sym_bs = cute.sym_int()
 
     a_fake = cute.runtime.make_fake_compact_tensor(
         ab_dtype,
-        (batch, sym_m, sym_k),
+        (sym_bs, sym_m, sym_k),
         stride_order=a_stride_order,
         assumed_align=16,
     )
     b_fake = cute.runtime.make_fake_compact_tensor(
         ab_dtype,
-        (batch, sym_k, sym_n),
+        (sym_bs, sym_k, sym_n),
         stride_order=b_stride_order,
         assumed_align=16,
     )
     c_fake = cute.runtime.make_fake_compact_tensor(
         c_dtype,
-        (batch, sym_m, sym_n),
+        (sym_bs, sym_m, sym_n),
         stride_order=c_stride_order,
         assumed_align=16,
     )
@@ -248,7 +248,6 @@ def _compile_and_create_tensor_api(
 
 @functools.cache
 def _get_compiled_bmm_sm100(
-    batch: int,
     ab_dtype: Type[cutlass.Numeric],
     c_dtype: Type[cutlass.Numeric],
     acc_dtype: Type[cutlass.Numeric],
@@ -268,7 +267,7 @@ def _get_compiled_bmm_sm100(
     per-call tensor wrapping overhead.
     """
     a_fake, b_fake, c_fake, scale_fake, stream_fake = _create_fake_tensors(
-        batch, ab_dtype, c_dtype, a_major, b_major, c_major
+        ab_dtype, c_dtype, a_major, b_major, c_major
     )
 
     gemm = PersistentDenseGemmKernel(
@@ -309,7 +308,7 @@ def _get_compiled_bmm_sm107(
     per-call tensor wrapping overhead.
     """
     a_fake, b_fake, c_fake, scale_fake, stream_fake = _create_fake_tensors(
-        batch, ab_dtype, c_dtype, a_major, b_major, c_major
+        ab_dtype, c_dtype, a_major, b_major, c_major
     )
 
     gemm = SM107PersistentDenseGemmKernel(
