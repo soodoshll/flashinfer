@@ -537,15 +537,19 @@ def moe_sort(
     # Pre-allocation is required for CUDA graph compatibility
     if out_tile_idx_to_expert_idx is not None:
         tile_idx_to_expert_idx = out_tile_idx_to_expert_idx
+        # Zero-fill to ensure safe defaults for entries beyond num_non_exiting_tiles.
+        # This prevents out-of-bounds weight accesses when Rubin kernels round up
+        # the tile count to an even number for cluster synchronization.
+        tile_idx_to_expert_idx.zero_()
     else:
-        tile_idx_to_expert_idx = torch.empty(
+        tile_idx_to_expert_idx = torch.zeros(
             (max_num_tiles,), dtype=torch.int32, device=device
         )
 
     if out_tile_idx_to_mn_limit is not None:
         tile_idx_to_mn_limit = out_tile_idx_to_mn_limit
     else:
-        tile_idx_to_mn_limit = torch.empty(
+        tile_idx_to_mn_limit = torch.zeros(
             (max_num_tiles,), dtype=torch.int32, device=device
         )
 
