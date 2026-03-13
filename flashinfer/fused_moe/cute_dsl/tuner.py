@@ -20,13 +20,11 @@ Auto-tuner for CuteDSL NVFP4 MoE kernels.
 This module provides a TunableRunner implementation for the CuteDSL NVFP4 MoE
 kernels, enabling automatic performance tuning across different GEMM tactics.
 
-Tactic format follows TRT-LLM's style:
-- GEMM1 (Gather + SwiGLU): (mma_tiler_mn, cluster_shape_mn, raster_along_m)
-- GEMM2 (Finalize): (mma_tiler_mn, cluster_shape_mn, raster_along_m)
+Supports two architectures:
+- Blackwell (SM100): tactic = (mma_tiler_mn, cluster_shape_mn, raster_along_m)
+- Rubin (SM107): tactic = (mma_tiler, mma_inst_shape, cluster_shape_mn, raster_along_m)
 
 Reference: TensorRT-LLM/tensorrt_llm/_torch/custom_ops/cute_dsl_custom_ops.py
-- Sm100BlockScaledContiguousGatherGroupedGemmSwigluFusionRunner.get_valid_tactics (line 1867)
-- Sm100BlockScaledContiguousGroupedGemmFinalizeFusionRunner.get_valid_tactics (line 1163)
 """
 
 import itertools
@@ -40,6 +38,7 @@ from ...autotuner import (
     TunableRunner,
     TuningConfig,
 )
+from ...utils import get_compute_capability
 from ..utils import (
     get_last_power_of_2_num_tokens_buckets,
     last_positive_power_of_2,
@@ -47,230 +46,339 @@ from ..utils import (
 
 
 # =============================================================================
-# GEMM1 Tactics (Gather + SwiGLU Fusion)
+# Blackwell (SM100) Tactics
 # =============================================================================
-# Reference: TRT-LLM cute_dsl_custom_ops.py line 1867-1897
-# Sm100BlockScaledContiguousGatherGroupedGemmSwigluFusionRunner.get_valid_tactics
-#
-# Format: (mma_tiler_mn, cluster_shape_mn, raster_along_m)
-# - mma_tiler_mn: (tile_size, N_tile) where tile_size is 128 or 256, N_tile is 128 or 256
-# - cluster_shape_mn: (tile_size // 128, cluster_n) where cluster_n is fixed to 1 for Gather kernel
-# - raster_along_m: False (fixed)
 
 
-def get_gemm1_valid_tactics(tile_size: int) -> List[Tuple]:
-    """Get valid tactics for GEMM1 (Gather + SwiGLU Fusion).
+def get_blackwell_gemm1_valid_tactics(tile_size: int) -> List[Tuple]:
+    """Get valid Blackwell tactics for GEMM1 (Gather + SwiGLU Fusion).
 
-    Reference: TRT-LLM cute_dsl_custom_ops.py line 1879-1897
-
-    Args:
-        tile_size: MMA tile M dimension (128 or 256)
-
-    Returns:
-        List of (mma_tiler_mn, cluster_shape_mn, raster_along_m) tuples
+    Format: (mma_tiler_mn, cluster_shape_mn, raster_along_m)
     """
-    # From TRT-LLM line 1879-1883:
-    # mma_tiler_mn_candidates = [(self.tile_size, 128), (self.tile_size, 256)]
-    # cluster_shape_mn_candidates = [(self.tile_size // 128, 1)]  # Note: Only 1, not 2!
-    # raster_along_m_candidates = [False]
-
     mma_tiler_mn_candidates = [(tile_size, 128), (tile_size, 256)]
-    cluster_shape_mn_candidates = [
-        (tile_size // 128, 1)
-    ]  # Gather kernel only supports cluster_n=1
+    cluster_shape_mn_candidates = [(tile_size // 128, 1)]
     raster_along_m_candidates = [False]
 
-    tactics = []
-    for mma_tiler_mn, cluster_shape_mn, raster_along_m in itertools.product(
-        mma_tiler_mn_candidates, cluster_shape_mn_candidates, raster_along_m_candidates
-    ):
-        tactics.append((mma_tiler_mn, cluster_shape_mn, raster_along_m))
-
-    return tactics
-
-
-# =============================================================================
-# GEMM2 Tactics (Finalize Fusion)
-# =============================================================================
-# Reference: TRT-LLM cute_dsl_custom_ops.py line 1163-1193
-# Sm100BlockScaledContiguousGroupedGemmFinalizeFusionRunner.get_valid_tactics
-#
-# Format: (mma_tiler_mn, cluster_shape_mn, raster_along_m)
-# - mma_tiler_mn: (tile_size, N_tile) where tile_size is 128 or 256, N_tile is 128 or 256
-# - cluster_shape_mn: (tile_size // 128, cluster_n) where cluster_n is 1 or 2
-# - raster_along_m: False (fixed, theoretically more performant)
+    return [
+        (mma_tiler_mn, cluster_shape_mn, raster_along_m)
+        for mma_tiler_mn, cluster_shape_mn, raster_along_m in itertools.product(
+            mma_tiler_mn_candidates,
+            cluster_shape_mn_candidates,
+            raster_along_m_candidates,
+        )
+    ]
 
 
-def get_gemm2_valid_tactics(tile_size: int) -> List[Tuple]:
-    """Get valid tactics for GEMM2 (Finalize Fusion).
+def get_blackwell_gemm2_valid_tactics(tile_size: int) -> List[Tuple]:
+    """Get valid Blackwell tactics for GEMM2 (Finalize Fusion).
 
-    Reference: TRT-LLM cute_dsl_custom_ops.py line 1173-1193
-
-    Args:
-        tile_size: MMA tile M dimension (128 or 256)
-
-    Returns:
-        List of (mma_tiler_mn, cluster_shape_mn, raster_along_m) tuples
+    Format: (mma_tiler_mn, cluster_shape_mn, raster_along_m)
     """
-    # From TRT-LLM line 1173-1179:
-    # mma_tiler_mn_candidates = [(self.tile_size, 128), (self.tile_size, 256)]
-    # cluster_shape_mn_candidates = [(self.tile_size // 128, 1), (self.tile_size // 128, 2)]
-    # raster_along_m_candidates = [False]
-
     mma_tiler_mn_candidates = [(tile_size, 128), (tile_size, 256)]
     cluster_shape_mn_candidates = [(tile_size // 128, 1), (tile_size // 128, 2)]
     raster_along_m_candidates = [False]
 
-    tactics = []
-    for mma_tiler_mn, cluster_shape_mn, raster_along_m in itertools.product(
-        mma_tiler_mn_candidates, cluster_shape_mn_candidates, raster_along_m_candidates
-    ):
-        tactics.append((mma_tiler_mn, cluster_shape_mn, raster_along_m))
-
-    return tactics
-
-
-# =============================================================================
-# Combined MoE Tactics
-# =============================================================================
-# The MoE pipeline uses both GEMM1 and GEMM2, they must share the same tile_size
-# (M dimension of mma_tiler_mn) because moe_sort uses tile_size for padding.
-#
-# Tactic format: (tile_size, gemm1_tactic, gemm2_tactic)
-# - tile_size: 128 or 256 (shared by both GEMMs and moe_sort)
-# - gemm1_tactic: (mma_tiler_mn, cluster_shape_mn, raster_along_m)
-# - gemm2_tactic: (mma_tiler_mn, cluster_shape_mn, raster_along_m)
+    return [
+        (mma_tiler_mn, cluster_shape_mn, raster_along_m)
+        for mma_tiler_mn, cluster_shape_mn, raster_along_m in itertools.product(
+            mma_tiler_mn_candidates,
+            cluster_shape_mn_candidates,
+            raster_along_m_candidates,
+        )
+    ]
 
 
-def get_moe_valid_tactics() -> List[Tuple]:
-    """Get all valid MoE tactic combinations.
+def get_blackwell_moe_valid_tactics() -> List[Tuple]:
+    """Get all valid Blackwell MoE tactic combinations.
 
-    Each tactic is a tuple: (tile_size, gemm1_tactic, gemm2_tactic)
-
-    The tile_size must be shared between GEMM1 and GEMM2 because:
-    1. moe_sort uses tile_size to pad tokens to tile boundaries
-    2. Both GEMMs process the same padded token sequence
-
-    Returns:
-        List of (tile_size, gemm1_tactic, gemm2_tactic) tuples
+    Returns: List of (tile_size, gemm1_tactic, gemm2_tactic)
     """
     tactics = []
-
     for tile_size in [128, 256]:
-        gemm1_tactics = get_gemm1_valid_tactics(tile_size)
-        gemm2_tactics = get_gemm2_valid_tactics(tile_size)
-
+        gemm1_tactics = get_blackwell_gemm1_valid_tactics(tile_size)
+        gemm2_tactics = get_blackwell_gemm2_valid_tactics(tile_size)
         for gemm1_tactic, gemm2_tactic in itertools.product(
             gemm1_tactics, gemm2_tactics
         ):
             tactics.append((tile_size, gemm1_tactic, gemm2_tactic))
-
     return tactics
 
 
-# Pre-generate all valid tactics
-# tile_size=128: 2 GEMM1 tactics × 4 GEMM2 tactics = 8
-# tile_size=256: 2 GEMM1 tactics × 4 GEMM2 tactics = 8
-# Total: 16 tactics
-ALL_MOE_TACTICS = get_moe_valid_tactics()
+# =============================================================================
+# Rubin (SM107) Tactics
+# =============================================================================
+# Rubin tactics use 3-tuple mma_tiler/mma_inst_shape and support B-reuse.
+# Fixed K dimensions for FP4: mma_tiler_k=256, mma_inst_k=128
+#
+# Format: (mma_tiler, mma_inst_shape, cluster_shape_mn, raster_along_m)
+# where mma_tiler = (M, N, K) and mma_inst_shape = (M', N, K')
 
-# Default tactic (tile_size=128, smallest MMA tiles, cluster_n=1)
-DEFAULT_MOE_TACTIC = (
-    128,  # tile_size
-    ((128, 128), (1, 1), False),  # gemm1_tactic
-    ((128, 128), (1, 1), False),  # gemm2_tactic
+
+def get_rubin_gemm1_valid_tactics(tile_size: int) -> List[Tuple]:
+    """Get valid Rubin tactics for GEMM1 (Gather + SwiGLU Fusion).
+
+    Format: (mma_tiler, mma_inst_shape, cluster_shape_mn, raster_along_m)
+    """
+    mma_tiler_k = 256
+    mma_inst_k = 128
+
+    # (mma_tiler_m, mma_inst_m) candidates — B-reuse when tiler_m = 2 * inst_m
+    mma_m_candidates = [
+        (128, 128),  # no B-reuse, 1CTA
+        (256, 256),  # no B-reuse, 2CTA
+        (256, 128),  # B-reuse, 1CTA
+        (512, 256),  # B-reuse, 2CTA
+    ]
+    mma_n_candidates = [128, 256]
+    cluster_shape_mn_candidates = [(1, 1), (2, 1)]
+    raster_along_m_candidates = [False]
+
+    valid_tactics = []
+    for (
+        mma_tiler_m,
+        mma_inst_m,
+    ), mma_n, cluster_shape_mn, raster_along_m in itertools.product(
+        mma_m_candidates,
+        mma_n_candidates,
+        cluster_shape_mn_candidates,
+        raster_along_m_candidates,
+    ):
+        if mma_tiler_m > tile_size:
+            continue
+        # GEMM1 is a gather GEMM: mma_tiler_m must equal tile_size so that
+        # each CTA's tile exactly covers one moe_sort tile in the M dimension.
+        # Smaller mma_tiler_m causes incorrect gather indexing.
+        if mma_tiler_m != tile_size:
+            continue
+        if cluster_shape_mn[0] * mma_tiler_m > tile_size:
+            continue
+        # 2CTA (mma_inst_m=256) requires even cluster_shape_m
+        if mma_inst_m == 256 and cluster_shape_mn[0] % 2 != 0:
+            continue
+
+        mma_tiler = (mma_tiler_m, mma_n, mma_tiler_k)
+        mma_inst_shape = (mma_inst_m, mma_n, mma_inst_k)
+        valid_tactics.append(
+            (mma_tiler, mma_inst_shape, cluster_shape_mn, raster_along_m)
+        )
+
+    return valid_tactics
+
+
+def get_rubin_gemm2_valid_tactics(tile_size: int) -> List[Tuple]:
+    """Get valid Rubin tactics for GEMM2 (Finalize Fusion).
+
+    Format: (mma_tiler, mma_inst_shape, cluster_shape_mn, raster_along_m)
+    """
+    mma_tiler_k = 256
+    mma_inst_k = 128
+
+    mma_m_candidates = [
+        (128, 128),
+        (256, 256),
+        (256, 128),
+        (512, 256),
+    ]
+    mma_n_candidates = [128, 256]
+    cluster_shape_mn_candidates = [(1, 1), (2, 1), (1, 2), (2, 2)]
+    raster_along_m_candidates = [False]
+
+    valid_tactics = []
+    for (
+        mma_tiler_m,
+        mma_inst_m,
+    ), mma_n, cluster_shape_mn, raster_along_m in itertools.product(
+        mma_m_candidates,
+        mma_n_candidates,
+        cluster_shape_mn_candidates,
+        raster_along_m_candidates,
+    ):
+        # tile_idx_to_expert_idx has one entry per routing tile (tile_size
+        # rows). mma_tiler_m must equal tile_size so that the CTA tile
+        # aligns with the routing tile — matching TRT-LLM's enforcement.
+        if mma_tiler_m != tile_size:
+            continue
+        if cluster_shape_mn[0] * mma_tiler_m > tile_size:
+            continue
+        # 2CTA (mma_inst_m=256) requires even cluster_shape_m
+        if mma_inst_m == 256 and cluster_shape_mn[0] % 2 != 0:
+            continue
+
+        mma_tiler = (mma_tiler_m, mma_n, mma_tiler_k)
+        mma_inst_shape = (mma_inst_m, mma_n, mma_inst_k)
+        valid_tactics.append(
+            (mma_tiler, mma_inst_shape, cluster_shape_mn, raster_along_m)
+        )
+
+    return valid_tactics
+
+
+def get_rubin_moe_valid_tactics() -> List[Tuple]:
+    """Get all valid Rubin MoE tactic combinations.
+
+    Returns: List of (tile_size, gemm1_tactic, gemm2_tactic)
+    """
+    tactics = []
+    for tile_size in [128, 256]:
+        gemm1_tactics = get_rubin_gemm1_valid_tactics(tile_size)
+        gemm2_tactics = get_rubin_gemm2_valid_tactics(tile_size)
+        for gemm1_tactic, gemm2_tactic in itertools.product(
+            gemm1_tactics, gemm2_tactics
+        ):
+            tactics.append((tile_size, gemm1_tactic, gemm2_tactic))
+    return tactics
+
+
+# =============================================================================
+# Pre-generated tactic sets
+# =============================================================================
+
+ALL_BLACKWELL_MOE_TACTICS = get_blackwell_moe_valid_tactics()
+ALL_RUBIN_MOE_TACTICS = get_rubin_moe_valid_tactics()
+
+
+DEFAULT_BLACKWELL_MOE_TACTIC = (
+    128,
+    ((128, 128), (1, 1), False),
+    ((128, 128), (1, 1), False),
 )
+
+DEFAULT_RUBIN_MOE_TACTIC = (
+    128,
+    ((128, 128, 256), (128, 128, 128), (1, 1), False),
+    ((128, 128, 256), (128, 128, 128), (1, 1), False),
+)
+
+# =============================================================================
+# Tactic parameter extraction
+# =============================================================================
+
+
+def _is_rubin_tactic(tactic: Tuple) -> bool:
+    """Detect whether a tactic is Rubin format by checking sub-tactic length.
+
+    Blackwell sub-tactic: (mma_tiler_mn, cluster_shape_mn, raster_along_m) — 3 elements
+    Rubin sub-tactic: (mma_tiler, mma_inst_shape, cluster_shape_mn, raster_along_m) — 4 elements
+    """
+    _, gemm1_tactic, _ = tactic
+    return len(gemm1_tactic) == 4
 
 
 def _extract_tactic_params(tactic: Tuple) -> Dict[str, Any]:
     """Extract parameters from a MoE tactic tuple.
 
-    Args:
-        tactic: (tile_size, gemm1_tactic, gemm2_tactic)
+    Handles both Blackwell and Rubin formats transparently.
 
     Returns:
-        Dictionary with all tactic parameters
+        Dictionary with all tactic parameters. For Rubin tactics, includes
+        'gemm1_mma_tiler', 'gemm1_mma_inst_shape', etc. in addition to
+        the standard keys.
     """
     tile_size, gemm1_tactic, gemm2_tactic = tactic
-    gemm1_mma_tiler_mn, gemm1_cluster_shape_mn, gemm1_raster_along_m = gemm1_tactic
-    gemm2_mma_tiler_mn, gemm2_cluster_shape_mn, gemm2_raster_along_m = gemm2_tactic
 
-    return {
-        "tile_size": tile_size,
-        "gemm1_mma_tiler_mn": gemm1_mma_tiler_mn,
-        "gemm1_cluster_shape_mn": gemm1_cluster_shape_mn,
-        "gemm1_raster_along_m": gemm1_raster_along_m,
-        "gemm2_mma_tiler_mn": gemm2_mma_tiler_mn,
-        "gemm2_cluster_shape_mn": gemm2_cluster_shape_mn,
-        "gemm2_raster_along_m": gemm2_raster_along_m,
-    }
+    if _is_rubin_tactic(tactic):
+        (
+            gemm1_mma_tiler,
+            gemm1_mma_inst_shape,
+            gemm1_cluster_shape_mn,
+            gemm1_raster_along_m,
+        ) = gemm1_tactic
+        (
+            gemm2_mma_tiler,
+            gemm2_mma_inst_shape,
+            gemm2_cluster_shape_mn,
+            gemm2_raster_along_m,
+        ) = gemm2_tactic
+        return {
+            "tile_size": tile_size,
+            "is_rubin": True,
+            "gemm1_mma_tiler_mn": (gemm1_mma_tiler[0], gemm1_mma_tiler[1]),
+            "gemm1_cluster_shape_mn": gemm1_cluster_shape_mn,
+            "gemm1_raster_along_m": gemm1_raster_along_m,
+            "gemm1_mma_tiler": gemm1_mma_tiler,
+            "gemm1_mma_inst_shape": gemm1_mma_inst_shape,
+            "gemm2_mma_tiler_mn": (gemm2_mma_tiler[0], gemm2_mma_tiler[1]),
+            "gemm2_cluster_shape_mn": gemm2_cluster_shape_mn,
+            "gemm2_raster_along_m": gemm2_raster_along_m,
+            "gemm2_mma_tiler": gemm2_mma_tiler,
+            "gemm2_mma_inst_shape": gemm2_mma_inst_shape,
+        }
+    else:
+        gemm1_mma_tiler_mn, gemm1_cluster_shape_mn, gemm1_raster_along_m = gemm1_tactic
+        gemm2_mma_tiler_mn, gemm2_cluster_shape_mn, gemm2_raster_along_m = gemm2_tactic
+        return {
+            "tile_size": tile_size,
+            "is_rubin": False,
+            "gemm1_mma_tiler_mn": gemm1_mma_tiler_mn,
+            "gemm1_cluster_shape_mn": gemm1_cluster_shape_mn,
+            "gemm1_raster_along_m": gemm1_raster_along_m,
+            "gemm1_mma_tiler": None,
+            "gemm1_mma_inst_shape": None,
+            "gemm2_mma_tiler_mn": gemm2_mma_tiler_mn,
+            "gemm2_cluster_shape_mn": gemm2_cluster_shape_mn,
+            "gemm2_raster_along_m": gemm2_raster_along_m,
+            "gemm2_mma_tiler": None,
+            "gemm2_mma_inst_shape": None,
+        }
+
+
+def _get_arch_tactics() -> List[Tuple]:
+    """Return the tactic list appropriate for the current GPU architecture."""
+    if not torch.cuda.is_available():
+        return ALL_BLACKWELL_MOE_TACTICS
+    major, minor = get_compute_capability(torch.device("cuda"))
+    if major == 10 and minor == 7:
+        return ALL_RUBIN_MOE_TACTICS
+    return ALL_BLACKWELL_MOE_TACTICS
+
+
+def _get_default_tactic() -> Tuple:
+    """Return the default tactic for the current GPU architecture."""
+    if not torch.cuda.is_available():
+        return DEFAULT_BLACKWELL_MOE_TACTIC
+    major, minor = get_compute_capability(torch.device("cuda"))
+    if major == 10 and minor == 7:
+        return DEFAULT_RUBIN_MOE_TACTIC
+    return DEFAULT_BLACKWELL_MOE_TACTIC
+
+
+# =============================================================================
+# TunableRunner
+# =============================================================================
 
 
 class CuteDslFusedMoENvfp4Runner(TunableRunner):
     """TunableRunner for CuteDSL NVFP4 MoE kernels.
 
-    This runner enables auto-tuning of the CuteDSL NVFP4 MoE pipeline by
-    trying different combinations of GEMM tactics.
-
-    Tactic format follows TRT-LLM style:
-        (tile_size, gemm1_tactic, gemm2_tactic)
-    where:
-        - tile_size: 128 or 256
-        - gemm1_tactic: (mma_tiler_mn, cluster_shape_mn, raster_along_m)
-        - gemm2_tactic: (mma_tiler_mn, cluster_shape_mn, raster_along_m)
-
-    Input tensor indices (for dynamic_tensor_specs):
-        0: x (num_tokens, hidden_size//2) - FP4 packed input
-        1: x_sf (num_tokens, hidden_size//sf_vec_size) - input scale factors
-        2: token_selected_experts (num_tokens, top_k) - expert assignments
-        3: token_final_scales (num_tokens, top_k) - routing weights
-        4-10: weight tensors (fixed size, don't depend on num_tokens)
-        11: moe_output (num_tokens, hidden_size) - output buffer
-
-    Args:
-        forward_impl: The actual MoE implementation function.
-        num_experts: Total number of experts.
-        top_k: Number of experts selected per token.
-        num_local_experts: Number of local experts (for expert parallelism).
-        local_expert_offset: Starting expert index for this partition.
-        use_fused_finalize: Whether to use fused finalize (default: True).
-        output_dtype: Output data type (default: torch.bfloat16).
+    Supports both Blackwell (SM100) and Rubin (SM107) architectures.
+    Tactic format is architecture-dependent — see _extract_tactic_params.
     """
 
-    # Tensor initializers for dynamic tensors (indices 0, 1, 2, 3, 11)
-    # These create valid dummy tensors for profiling with different num_tokens
     dynamic_tensor_initializers = [
-        # 0: x - FP4 quantized input (uint8 packed)
         lambda shapes, dtype, device: torch.randint(
             0, 256, shapes, dtype=torch.uint8, device=device
         ),
-        # 1: x_sf - FP8 scale factors (uint8)
         lambda shapes, dtype, device: torch.randint(
             1, 128, shapes, dtype=torch.uint8, device=device
         ),
-        # 2: token_selected_experts - expert indices (int32, 0 to num_experts-1)
         lambda shapes, dtype, device: torch.randint(
             0,
             8,
             shapes,
             dtype=torch.int32,
-            device=device,  # num_experts=8 typical
+            device=device,
         ),
-        # 3: token_final_scales - routing weights (float32, softmax normalized)
         lambda shapes, dtype, device: torch.softmax(
             torch.randn(shapes, device=device), dim=-1
         ).to(torch.float32),
-        # 11: moe_output - output buffer (bfloat16)
         lambda shapes, dtype, device: torch.empty(shapes, dtype=dtype, device=device),
     ]
 
-    # Tuning config with dynamic tensor specs for num_tokens dimension
-    # Indices 0, 1, 2, 3, 11 all have num_tokens as their first dimension
     tuning_config = TuningConfig(
         dynamic_tensor_specs=(
             DynamicTensorSpec(
-                input_idx=(0, 1, 2, 3, 11),  # x, x_sf, experts, scales, moe_output
-                dim_idx=(0, 0, 0, 0, 0),  # First dimension is num_tokens for all
+                input_idx=(0, 1, 2, 3, 11),
+                dim_idx=(0, 0, 0, 0, 0),
                 gen_tuning_buckets=get_last_power_of_2_num_tokens_buckets(8192),
                 map_to_tuning_buckets=lambda x: min(last_positive_power_of_2(x), 8192),
                 tensor_initializers=dynamic_tensor_initializers,
@@ -287,6 +395,7 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
         local_expert_offset: int = 0,
         use_fused_finalize: bool = True,
         output_dtype: torch.dtype = torch.bfloat16,
+        enable_pdl: bool = True,
     ):
         self.forward_impl = forward_impl
         self.num_experts = num_experts
@@ -295,6 +404,7 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
         self.local_expert_offset = local_expert_offset
         self.use_fused_finalize = use_fused_finalize
         self.output_dtype = output_dtype
+        self.enable_pdl = enable_pdl
 
     def __hash__(self):
         return hash(
@@ -313,51 +423,22 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
         inputs: List[torch.Tensor],
         profile: OptimizationProfile,
     ) -> List[Tuple[Any, ...]]:
-        """Return list of valid tactics.
-
-        Returns tactics in TRT-LLM format:
-            (tile_size, gemm1_tactic, gemm2_tactic)
-
-        Args:
-            inputs: List of input tensors (not used for tactic validation).
-            profile: Optimization profile (not used for tactic validation).
-
-        Returns:
-            List of valid tactic tuples.
-        """
-        # Return all pre-generated tactics
-        # In practice, some might be invalid for certain problem sizes,
-        # but the kernel will handle that with can_implement checks
-        return ALL_MOE_TACTICS
+        """Return valid tactics for the current GPU architecture."""
+        return _get_arch_tactics()
 
     def forward(  # type: ignore[override]
         self,
         inputs: List[torch.Tensor],
-        tactic: Tuple[Any, ...] = None,  # type: ignore[assignment]
+        tactic: Tuple[Any, ...] = None,
         do_preparation: bool = False,
         **kwargs: Any,
     ) -> torch.Tensor:
-        """Execute the MoE forward pass with the specified tactic.
-
-        Args:
-            inputs: List of input tensors:
-                [x, x_sf, token_selected_experts, token_final_scales,
-                 w1_weight, w1_weight_sf, w1_alpha, fc2_input_scale,
-                 w2_weight, w2_weight_sf, w2_alpha, moe_output (optional)]
-            tactic: Tactic tuple (tile_size, gemm1_tactic, gemm2_tactic) or None for default.
-            do_preparation: If True, perform one-time setup (not used).
-            **kwargs: Additional keyword arguments passed to forward_impl.
-
-        Returns:
-            Output tensor from the MoE computation.
-        """
+        """Execute the MoE forward pass with the specified tactic."""
         if tactic is None or tactic == -1:
-            tactic = DEFAULT_MOE_TACTIC
+            tactic = _get_default_tactic()
 
-        # Extract parameters from tactic
         params = _extract_tactic_params(tactic)
 
-        # Unpack inputs
         (
             x,
             x_sf,
@@ -375,7 +456,6 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
 
         moe_output = optional_inputs[0] if optional_inputs else None
 
-        # Call the implementation with tactic parameters
         return self.forward_impl(
             x=x,
             x_sf=x_sf,
@@ -397,9 +477,14 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
             gemm1_cluster_shape_mn=params["gemm1_cluster_shape_mn"],
             gemm2_mma_tiler_mn=params["gemm2_mma_tiler_mn"],
             gemm2_cluster_shape_mn=params["gemm2_cluster_shape_mn"],
+            gemm1_mma_tiler=params["gemm1_mma_tiler"],
+            gemm1_mma_inst_shape=params["gemm1_mma_inst_shape"],
+            gemm2_mma_tiler=params["gemm2_mma_tiler"],
+            gemm2_mma_inst_shape=params["gemm2_mma_inst_shape"],
             output_dtype=self.output_dtype,
             use_fused_finalize=self.use_fused_finalize,
             moe_output=moe_output,
+            enable_pdl=self.enable_pdl,
             **kwargs,
         )
 
@@ -411,16 +496,14 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
 
 def print_all_tactics():
     """Print all valid MoE tactics for debugging."""
-    print(f"Total MoE tactics: {len(ALL_MOE_TACTICS)}")
-    print()
-    for i, tactic in enumerate(ALL_MOE_TACTICS):
-        tile_size, gemm1_tactic, gemm2_tactic = tactic
-        print(f"Tactic {i}:")
-        print(f"  tile_size: {tile_size}")
-        print(
-            f"  gemm1: mma_tiler_mn={gemm1_tactic[0]}, cluster_shape_mn={gemm1_tactic[1]}, raster_along_m={gemm1_tactic[2]}"
-        )
-        print(
-            f"  gemm2: mma_tiler_mn={gemm2_tactic[0]}, cluster_shape_mn={gemm2_tactic[1]}, raster_along_m={gemm2_tactic[2]}"
-        )
+    for label, tactics in [
+        ("Blackwell", ALL_BLACKWELL_MOE_TACTICS),
+        ("Rubin", ALL_RUBIN_MOE_TACTICS),
+    ]:
+        print(f"{label} MoE tactics: {len(tactics)}")
+        for i, tactic in enumerate(tactics):
+            tile_size, gemm1_tactic, gemm2_tactic = tactic
+            print(
+                f"  Tactic {i}: tile_size={tile_size}, gemm1={gemm1_tactic}, gemm2={gemm2_tactic}"
+            )
         print()

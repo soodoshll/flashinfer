@@ -14,18 +14,17 @@
 # limitations under the License.
 
 """
-Blackwell (SM100) specific kernel utilities.
+Rubin (SM107) specific kernel utilities.
 
 Re-exports shared utilities from common/kernel_utils.py and adds
-Blackwell-specific functions: fmin (with explicit return type),
-blk_reduce_bf16, blk_reduce_fp32, blk_reduce_fp16.
+Rubin-specific fmin (without explicit return type argument).
 """
 
 from typing import Union
 
 import cutlass
-from cutlass._mlir.dialects import llvm, nvvm
-from cutlass.cutlass_dsl import T, dsl_user_op
+from cutlass._mlir.dialects import nvvm
+from cutlass.cutlass_dsl import dsl_user_op
 
 # Re-export all shared utilities so existing imports continue to work
 from ..common.kernel_utils import (  # noqa: F401
@@ -43,7 +42,7 @@ from ..common.kernel_utils import (  # noqa: F401
 
 
 # ============================================================================
-# Blackwell-specific functions
+# Rubin-specific functions
 # ============================================================================
 
 
@@ -58,62 +57,10 @@ def fmin(
 ) -> cutlass.Float32:
     return cutlass.Float32(
         nvvm.fmin(
-            T.f32(),
             cutlass.Float32(a).ir_value(loc=loc, ip=ip),
             cutlass.Float32(b).ir_value(loc=loc, ip=ip),
             nan=nan,
             loc=loc,
             ip=ip,
         )
-    )
-
-
-@dsl_user_op
-def blk_reduce_bf16(dst_gemm, src_smem, size, loc=None, ip=None):
-    llvm.inline_asm(
-        None,
-        [
-            dst_gemm.iterator.llvm_ptr,
-            src_smem.iterator.llvm_ptr,
-            size.ir_value(),
-        ],
-        "cp.reduce.async.bulk.global.shared::cta.bulk_group.add.noftz.bf16 [$0], [$1], $2;",
-        "l,l,r",
-        has_side_effects=True,
-        loc=loc,
-        ip=ip,
-    )
-
-
-@dsl_user_op
-def blk_reduce_fp32(dst_gemm, src_smem, size, loc=None, ip=None):
-    llvm.inline_asm(
-        None,
-        [
-            dst_gemm.iterator.llvm_ptr,
-            src_smem.iterator.llvm_ptr,
-            size.ir_value(),
-        ],
-        "cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f32 [$0], [$1], $2;",
-        "l,l,r",
-        has_side_effects=True,
-        loc=loc,
-        ip=ip,
-    )
-
-
-@dsl_user_op
-def blk_reduce_fp16(dst_gemm, src_smem, size, loc=None, ip=None):
-    llvm.inline_asm(
-        None,
-        [
-            dst_gemm.iterator.llvm_ptr,
-            src_smem.iterator.llvm_ptr,
-            size.ir_value(),
-        ],
-        "cp.reduce.async.bulk.global.shared::cta.bulk_group.noftz.f16 [$0], [$1], $2;",
-        "l,l,r",
-        has_side_effects=True,
-        loc=loc,
-        ip=ip,
     )

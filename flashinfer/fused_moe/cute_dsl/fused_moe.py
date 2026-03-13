@@ -15,7 +15,7 @@ limitations under the License.
 """
 
 """
-CuteDSL-based Fused MoE API for NVFP4 on Blackwell GPUs.
+CuteDSL-based Fused MoE API for NVFP4 on Blackwell and Rubin GPUs.
 
 This module provides high-level APIs for running Mixture of Experts (MoE)
 computations using CuteDSL kernels.
@@ -68,8 +68,8 @@ from .blockscaled_contiguous_grouped_gemm_finalize_fusion import (
     blockscaled_contiguous_grouped_gemm_finalize_fusion_nvfp4,
 )
 from .tuner import (
-    ALL_MOE_TACTICS,
     CuteDslFusedMoENvfp4Runner,
+    _get_arch_tactics,
 )
 
 
@@ -119,12 +119,17 @@ def _moe_core_impl(
     top_k: int,
     num_local_experts: int,
     local_expert_offset: int = 0,
-    # Tactic parameters
+    # Tactic parameters (Blackwell)
     tile_size: int = 128,
     gemm1_mma_tiler_mn: Tuple[int, int] = (128, 128),
     gemm1_cluster_shape_mn: Tuple[int, int] = (1, 1),
     gemm2_mma_tiler_mn: Tuple[int, int] = (128, 128),
     gemm2_cluster_shape_mn: Tuple[int, int] = (1, 1),
+    # Tactic parameters (Rubin — when set, use SM107 kernel)
+    gemm1_mma_tiler: Optional[Tuple[int, int, int]] = None,
+    gemm1_mma_inst_shape: Optional[Tuple[int, int, int]] = None,
+    gemm2_mma_tiler: Optional[Tuple[int, int, int]] = None,
+    gemm2_mma_inst_shape: Optional[Tuple[int, int, int]] = None,
     # Pre-allocated buffers (for CUDA graph)
     moe_sort_buffers: Optional[Dict[str, torch.Tensor]] = None,
     gemm1_out: Optional[torch.Tensor] = None,
@@ -137,6 +142,7 @@ def _moe_core_impl(
     # Options
     output_dtype: torch.dtype = torch.bfloat16,
     use_async_memset: bool = True,
+    enable_pdl: bool = True,
 ) -> torch.Tensor:
     """Core MoE implementation shared by functional and wrapper APIs.
 
@@ -219,6 +225,16 @@ def _moe_core_impl(
         **moe_sort_kwargs,
     )
 
+    # For Rubin, round num_non_exiting_tiles to the next EVEN number to
+    # prevent a cluster-synchronization deadlock. With cluster_shape_m=2,
+    # two CTAs get consecutive tile indices; if the count is odd, one CTA
+    # enters the cluster barrier while the other skips it.
+    is_rubin = gemm1_mma_tiler is not None and gemm1_mma_inst_shape is not None
+    if is_rubin:
+        kernel_num_non_exiting_tiles = ((num_non_exiting_tiles + 1) // 2) * 2
+    else:
+        kernel_num_non_exiting_tiles = num_non_exiting_tiles
+
     # Record event for async memset synchronization
     if use_async_memset:
         main_event.record()
@@ -235,7 +251,7 @@ def _moe_core_impl(
             tile_idx_to_expert_idx=tile_idx_to_expert_idx,
             tile_idx_to_mn_limit=tile_idx_to_mn_limit,
             token_id_mapping=permuted_idx_to_expanded_idx,
-            num_non_exiting_tiles=num_non_exiting_tiles,
+            num_non_exiting_tiles=kernel_num_non_exiting_tiles,
             out=gemm1_out,
             out_scale=gemm1_out_scale,
             global_scale=fc2_input_scale,
@@ -243,6 +259,9 @@ def _moe_core_impl(
             c_dtype="float4_e2m1fn",
             mma_tiler_mn=gemm1_mma_tiler_mn,
             cluster_shape_mn=gemm1_cluster_shape_mn,
+            mma_tiler=gemm1_mma_tiler,
+            mma_inst_shape=gemm1_mma_inst_shape,
+            enable_pdl=enable_pdl,
         )
     )
 
@@ -277,13 +296,16 @@ def _moe_core_impl(
         b_scale=w2_weight_sf,
         alpha=w2_alpha,
         tile_idx_to_expert_idx=tile_idx_to_expert_idx,
-        num_non_exiting_tiles=num_non_exiting_tiles,
+        num_non_exiting_tiles=kernel_num_non_exiting_tiles,
         tile_idx_to_mn_limit=tile_idx_to_mn_limit,
         permuted_idx_to_expanded_idx=permuted_idx_to_expanded_idx,
         token_final_scales=token_final_scales,
         out=moe_output,
         mma_tiler_mn=gemm2_mma_tiler_mn,
         cluster_shape_mn=gemm2_cluster_shape_mn,
+        mma_tiler=gemm2_mma_tiler,
+        mma_inst_shape=gemm2_mma_inst_shape,
+        enable_pdl=enable_pdl,
     )
 
     return moe_output[:num_tokens]
@@ -347,6 +369,7 @@ class CuteDslMoEWrapper:
         sf_vec_size: int = 16,
         output_dtype: torch.dtype = torch.bfloat16,
         device: str = "cuda",
+        enable_pdl: bool = True,
     ):
         """Initialize the MoE wrapper.
 
@@ -363,6 +386,7 @@ class CuteDslMoEWrapper:
             sf_vec_size: Scale factor vector size. Default: 16.
             output_dtype: Output data type. Default: torch.bfloat16.
             device: Device for buffer allocation. Default: "cuda".
+            enable_pdl: Enable Programmatic Dependent Launch. Default: True.
         """
         self.num_experts = num_experts
         self.top_k = top_k
@@ -376,6 +400,7 @@ class CuteDslMoEWrapper:
         self.sf_vec_size = sf_vec_size
         self.output_dtype = output_dtype
         self.device = device
+        self.enable_pdl = enable_pdl
 
         # Pre-allocated buffers
         self._moe_sort_buffers: Optional[Dict[str, torch.Tensor]] = None
@@ -395,6 +420,7 @@ class CuteDslMoEWrapper:
             local_expert_offset=local_expert_offset,
             use_fused_finalize=True,
             output_dtype=output_dtype,
+            enable_pdl=enable_pdl,
         )
 
         if use_cuda_graph:
@@ -465,9 +491,14 @@ class CuteDslMoEWrapper:
         gemm1_cluster_shape_mn: Tuple[int, int] = (1, 1),
         gemm2_mma_tiler_mn: Tuple[int, int] = (128, 128),
         gemm2_cluster_shape_mn: Tuple[int, int] = (1, 1),
+        gemm1_mma_tiler=None,
+        gemm1_mma_inst_shape=None,
+        gemm2_mma_tiler=None,
+        gemm2_mma_inst_shape=None,
         output_dtype: torch.dtype = torch.bfloat16,
         use_fused_finalize: bool = True,
         moe_output: Optional[torch.Tensor] = None,
+        enable_pdl: bool = True,
         **kwargs,
     ) -> torch.Tensor:
         """Forward implementation called by auto-tuner."""
@@ -492,6 +523,10 @@ class CuteDslMoEWrapper:
             gemm1_cluster_shape_mn=gemm1_cluster_shape_mn,
             gemm2_mma_tiler_mn=gemm2_mma_tiler_mn,
             gemm2_cluster_shape_mn=gemm2_cluster_shape_mn,
+            gemm1_mma_tiler=gemm1_mma_tiler,
+            gemm1_mma_inst_shape=gemm1_mma_inst_shape,
+            gemm2_mma_tiler=gemm2_mma_tiler,
+            gemm2_mma_inst_shape=gemm2_mma_inst_shape,
             moe_sort_buffers=self._moe_sort_buffers if self.use_cuda_graph else None,
             gemm1_out=self._gemm1_output if self.use_cuda_graph else None,
             gemm1_out_scale=self._gemm1_output_scale if self.use_cuda_graph else None,
@@ -503,6 +538,7 @@ class CuteDslMoEWrapper:
             memset_event=self._memset_event,
             output_dtype=output_dtype,
             use_async_memset=True,
+            enable_pdl=enable_pdl,
         )
 
     @flashinfer_api
@@ -594,7 +630,7 @@ class CuteDslMoEWrapper:
 
     def get_valid_tactics(self) -> list:
         """Return list of valid tactics for this MoE configuration."""
-        return ALL_MOE_TACTICS
+        return _get_arch_tactics()
 
 
 # =============================================================================
@@ -623,10 +659,15 @@ def _cute_dsl_fused_moe_nvfp4_impl(
     gemm1_cluster_shape_mn: Tuple[int, int] = (1, 1),
     gemm2_mma_tiler_mn: Tuple[int, int] = (128, 128),
     gemm2_cluster_shape_mn: Tuple[int, int] = (1, 1),
+    gemm1_mma_tiler=None,
+    gemm1_mma_inst_shape=None,
+    gemm2_mma_tiler=None,
+    gemm2_mma_inst_shape=None,
     output_dtype: torch.dtype = torch.bfloat16,
     use_fused_finalize: bool = True,
     moe_output: Optional[torch.Tensor] = None,
     aux_stream: Optional[torch.cuda.Stream] = None,
+    enable_pdl: bool = True,
 ) -> torch.Tensor:
     """Internal implementation called by auto-tuner for functional API."""
     return _moe_core_impl(
@@ -650,10 +691,15 @@ def _cute_dsl_fused_moe_nvfp4_impl(
         gemm1_cluster_shape_mn=gemm1_cluster_shape_mn,
         gemm2_mma_tiler_mn=gemm2_mma_tiler_mn,
         gemm2_cluster_shape_mn=gemm2_cluster_shape_mn,
+        gemm1_mma_tiler=gemm1_mma_tiler,
+        gemm1_mma_inst_shape=gemm1_mma_inst_shape,
+        gemm2_mma_tiler=gemm2_mma_tiler,
+        gemm2_mma_inst_shape=gemm2_mma_inst_shape,
         moe_output=moe_output,
         aux_stream=aux_stream,
         output_dtype=output_dtype,
         use_async_memset=True,
+        enable_pdl=enable_pdl,
     )
 
 
@@ -678,6 +724,7 @@ def cute_dsl_fused_moe_nvfp4(
     use_fused_finalize: bool = True,
     moe_output: Optional[torch.Tensor] = None,
     aux_stream: Optional[torch.cuda.Stream] = None,
+    enable_pdl: bool = True,
 ) -> torch.Tensor:
     """Run fused MoE computation using CuteDSL NVFP4 kernels.
 
@@ -736,6 +783,7 @@ def cute_dsl_fused_moe_nvfp4(
         local_expert_offset=local_expert_offset,
         use_fused_finalize=use_fused_finalize,
         output_dtype=output_dtype,
+        enable_pdl=enable_pdl,
     )
 
     inputs = [

@@ -20,9 +20,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Contiguous Grouped GEMM kernel with Gather and SwiGLU Fusion for MoE workloads on Blackwell GPUs.
+Contiguous Grouped GEMM kernel with Gather and SwiGLU Fusion for MoE workloads.
 
-This module provides a FlashInfer-style API wrapper around the TensorRT-LLM CuteDSL
+This module provides a FlashInfer-style API wrapper around the CuteDSL
 grouped GEMM kernel with fused gather and SwiGLU activation designed for MoE GEMM1 layers:
 - Input A: (seq_len, k) - original unpermuted tokens (no need for moe_permute!)
 - Input B: (num_experts, 2*intermediate_size, k) - expert gate and up weights interleaved
@@ -36,7 +36,7 @@ Key features:
 - Optional FP4 quantization of output with scale factor generation
 - Persistent tile scheduling with per-expert group mapping
 - Warp specialization for overlapped memory and compute
-- Support for SM100 (Blackwell) architecture
+- Support for SM100 (Blackwell) and SM107 (Rubin) architectures
 
 Comparison with Non-Gather SwiGLU Fusion:
 - Non-Gather: Requires separate moe_permute kernel, then uses TMA for contiguous A load
@@ -60,12 +60,15 @@ from flashinfer.cute_dsl.utils import (
     make_ptr,
 )
 
-# Import the TRT-LLM kernel implementation
+# Import the Blackwell (SM100) kernel implementation
 from .blackwell.blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion import (
     BlockScaledContiguousGatherGroupedGemmKernel,
 )
 
-# Re-export the kernel class
+# Import the Rubin (SM107) kernel implementation
+from .rubin.blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion import (
+    Sm107BlockScaledContiguousGatherGroupedGemmSwigluFusionKernel,
+)
 
 
 def create_gather_gemm_tensors(
@@ -217,59 +220,72 @@ def _get_compiled_gather_kernel(
     sf_vec_size: int,
     tile_size: int,
     topk: int,
-    mma_tiler_mn: Tuple[int, int],
     cluster_shape_mn: Tuple[int, int],
     vectorized_f32: bool,
     raster_along_m: bool,
+    # Blackwell-specific
+    mma_tiler_mn: Optional[Tuple[int, int]] = None,
+    # Rubin-specific
+    mma_tiler: Optional[Tuple[int, int, int]] = None,
+    mma_inst_shape: Optional[Tuple[int, int, int]] = None,
+    # PDL control
+    enable_pdl: bool = True,
 ):
     """Get or compile the gather grouped GEMM with SwiGLU kernel.
 
     This function caches compiled kernels by tactic and dtype parameters.
     Problem dimensions (m, n, k, num_experts) are runtime parameters.
 
-    The cache key includes dtype parameters because cute.compile specializes
-    on the types of pointer arguments. Using the same compiled kernel with
-    different dtypes would cause incorrect results or crashes.
-
-    This matches TRT-LLM's approach where the same compiled kernel can be
-    reused for different problem sizes, significantly reducing JIT compilation
-    overhead during autotuning.
+    Supports both Blackwell (SM100, via mma_tiler_mn) and Rubin (SM107,
+    via mma_tiler + mma_inst_shape) architectures.
     """
     global _gather_kernel_cache
 
-    # Cache key includes dtype and tactic parameters, NOT problem dimensions
+    is_rubin = mma_tiler is not None and mma_inst_shape is not None
+
     cache_key = (
+        "sm107" if is_rubin else "sm100",
         ab_dtype,
         sf_dtype,
         c_dtype,
         sf_vec_size,
         tile_size,
         topk,
-        mma_tiler_mn,
+        mma_tiler if is_rubin else mma_tiler_mn,
+        mma_inst_shape if is_rubin else None,
         cluster_shape_mn,
         vectorized_f32,
         raster_along_m,
+        enable_pdl,
     )
 
     if cache_key not in _gather_kernel_cache:
-        # Create kernel instance
-        gemm = BlockScaledContiguousGatherGroupedGemmKernel(
-            sf_vec_size=sf_vec_size,
-            mma_tiler_mn=mma_tiler_mn,
-            cluster_shape_mn=cluster_shape_mn,
-            vectorized_f32=vectorized_f32,
-            topk=topk,
-            raster_along_m=raster_along_m,
-        )
+        if is_rubin:
+            gemm_rubin = Sm107BlockScaledContiguousGatherGroupedGemmSwigluFusionKernel(
+                sf_vec_size=sf_vec_size,
+                mma_inst_shape=mma_inst_shape,
+                mma_tiler=mma_tiler,
+                cluster_shape_mn=cluster_shape_mn,
+                vectorized_f32=vectorized_f32,
+                topk=topk,
+                raster_along_m=raster_along_m,
+                enable_pdl=enable_pdl,
+            )
+            wrapper_fn = gemm_rubin.wrapper
+        else:
+            gemm_bw = BlockScaledContiguousGatherGroupedGemmKernel(
+                sf_vec_size=sf_vec_size,
+                mma_tiler_mn=mma_tiler_mn,
+                cluster_shape_mn=cluster_shape_mn,
+                vectorized_f32=vectorized_f32,
+                topk=topk,
+                raster_along_m=raster_along_m,
+                enable_pdl=enable_pdl,
+            )
+            wrapper_fn = gemm_bw.wrapper
 
-        # Compile with runtime parameters - they can vary across calls
-        # Order must match wrapper signature:
-        # (a_ptr, b_ptr, a_sf_ptr, b_sf_ptr, c_ptr, c_sf_ptr, alpha_ptr,
-        #  tile_idx_to_group_idx_ptr, tile_idx_to_mn_limit_ptr, token_id_mapping_ptr,
-        #  num_non_exiting_tiles_ptr, global_sf_ptr, orig_m, m, n, k, l,
-        #  tile_size, scaling_vector_size, max_active_clusters, stream)
         compiled_gemm = cute.compile(
-            gemm.wrapper,
+            wrapper_fn,
             a_ptr,
             b_ptr,
             a_sf_ptr,
@@ -323,6 +339,10 @@ def blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_nvfp4(
     vectorized_f32: bool = True,
     raster_along_m: bool = False,
     sm_count: Optional[int] = None,
+    # Rubin-specific parameters (optional; when set, use SM107 kernel)
+    mma_tiler: Optional[Tuple[int, int, int]] = None,
+    mma_inst_shape: Optional[Tuple[int, int, int]] = None,
+    enable_pdl: bool = True,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """Blockscaled Contiguous Gather Grouped GEMM with SwiGLU Fusion for MoE workloads.
 
@@ -421,9 +441,10 @@ def blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_nvfp4(
 
     # Check compute capability
     major, minor = get_compute_capability(a.device)
+    is_rubin = mma_tiler is not None and mma_inst_shape is not None
     if major != 10:
         raise ValueError(
-            f"Blockscaled contiguous gather grouped GEMM with SwiGLU requires SM100 family (Blackwell: SM100, SM103, SM110). "
+            f"Blockscaled contiguous gather grouped GEMM with SwiGLU requires SM10x family. "
             f"Got SM{major}{minor}."
         )
 
@@ -432,24 +453,47 @@ def blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_nvfp4(
     sf_dtype_cutlass = get_cutlass_dtype(sf_dtype)
     c_dtype_cutlass = get_cutlass_dtype(c_dtype)
 
-    if not BlockScaledContiguousGatherGroupedGemmKernel.can_implement(
-        ab_dtype_cutlass,
-        sf_dtype_cutlass,
-        sf_vec_size,
-        c_dtype_cutlass,
-        mma_tiler_mn,
-        cluster_shape_mn,
-        permuted_m,
-        n,
-        k,
-        num_experts,
-        a_major="k",
-        b_major="k",
-        c_major="n",
-    ):
+    if is_rubin:
+        can_impl = (
+            Sm107BlockScaledContiguousGatherGroupedGemmSwigluFusionKernel.can_implement(
+                a_dtype=ab_dtype_cutlass,
+                b_dtype=ab_dtype_cutlass,
+                sf_dtype=sf_dtype_cutlass,
+                sf_vec_size=sf_vec_size,
+                c_dtype=c_dtype_cutlass,
+                mma_inst_shape=mma_inst_shape,
+                mma_tiler=mma_tiler,
+                cluster_shape_mn=cluster_shape_mn,
+                m=permuted_m,
+                n=n,
+                k=k,
+                l=num_experts,
+                a_major="k",
+                b_major="k",
+                c_major="n",
+            )
+        )
+    else:
+        can_impl = BlockScaledContiguousGatherGroupedGemmKernel.can_implement(
+            ab_dtype_cutlass,
+            sf_dtype_cutlass,
+            sf_vec_size,
+            c_dtype_cutlass,
+            mma_tiler_mn,
+            cluster_shape_mn,
+            permuted_m,
+            n,
+            k,
+            num_experts,
+            a_major="k",
+            b_major="k",
+            c_major="n",
+        )
+    if not can_impl:
         raise ValueError(
             f"Unsupported configuration: ab_dtype={ab_dtype}, sf_dtype={sf_dtype}, "
-            f"sf_vec_size={sf_vec_size}, c_dtype={c_dtype}, mma_tiler_mn={mma_tiler_mn}, "
+            f"sf_vec_size={sf_vec_size}, c_dtype={c_dtype}, "
+            f"mma_tiler_mn={mma_tiler_mn}, mma_tiler={mma_tiler}, mma_inst_shape={mma_inst_shape}, "
             f"cluster_shape_mn={cluster_shape_mn}, shape=({permuted_m}, {n}, {k}, {num_experts})"
         )
 
@@ -495,8 +539,7 @@ def blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_nvfp4(
         cluster_shape_mn[0] * cluster_shape_mn[1]
     )
 
-    # Get tile_size from mma_tiler_mn
-    tile_size = mma_tiler_mn[0]
+    tile_size = mma_tiler[0] if is_rubin else mma_tiler_mn[0]
 
     # Create raw pointers (TRT-LLM style) - allows same compiled kernel for different sizes
     a_ptr = make_ptr(
@@ -547,15 +590,12 @@ def blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_nvfp4(
     torch_stream = torch.cuda.current_stream()
     stream = cuda.CUstream(torch_stream.cuda_stream)
 
-    # Get or compile the kernel (cached by dtype and tactic parameters)
     compiled_gemm = _get_compiled_gather_kernel(
-        # Runtime parameters (problem dimensions)
         orig_m=seq_len,
         permuted_m=permuted_m,
         n=n,
         k=k,
         num_experts=num_experts,
-        # Tensor pointers (order must match wrapper signature)
         a_ptr=a_ptr,
         b_ptr=b_ptr,
         a_sf_ptr=a_sf_ptr,
@@ -570,18 +610,19 @@ def blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_nvfp4(
         norm_const_ptr=norm_const_ptr,
         max_active_clusters=max_active_clusters,
         stream=stream,
-        # Dtype parameters (compile-time, in cache key)
         ab_dtype=ab_dtype,
         sf_dtype=sf_dtype,
         c_dtype=c_dtype,
-        # Tactic parameters (compile-time, cached)
         sf_vec_size=sf_vec_size,
         tile_size=tile_size,
         topk=topk,
-        mma_tiler_mn=mma_tiler_mn,
         cluster_shape_mn=cluster_shape_mn,
         vectorized_f32=vectorized_f32,
         raster_along_m=raster_along_m,
+        mma_tiler_mn=mma_tiler_mn if not is_rubin else None,
+        mma_tiler=mma_tiler if is_rubin else None,
+        mma_inst_shape=mma_inst_shape if is_rubin else None,
+        enable_pdl=enable_pdl,
     )
 
     # Execute kernel with runtime parameters

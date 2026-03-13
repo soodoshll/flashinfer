@@ -368,7 +368,7 @@ def blockscaled_contiguous_grouped_gemm_nvfp4(
     major, minor = get_compute_capability(a.device)
     if major != 10:
         raise ValueError(
-            f"Blockscaled contiguous grouped GEMM requires SM100 family (Blackwell: SM100, SM103, SM110). "
+            f"Blockscaled contiguous grouped GEMM requires SM10x family (Blackwell: SM100, SM103; Rubin: SM107). "
             f"Got SM{major}{minor}."
         )
 

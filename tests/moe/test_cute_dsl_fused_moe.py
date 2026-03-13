@@ -15,7 +15,7 @@ limitations under the License.
 """
 
 """
-Numerical accuracy tests for CuteDSL Fused MoE NVFP4 on Blackwell GPUs.
+Numerical accuracy tests for CuteDSL Fused MoE NVFP4 on Blackwell and Rubin GPUs.
 
 This test file covers both APIs:
 1. Functional API: `cute_dsl_fused_moe_nvfp4`
@@ -35,12 +35,8 @@ from torch.nn import functional as F
 from flashinfer.cute_dsl import is_cute_dsl_available
 
 
-def is_sm100_family():
-    """Check for SM100 family (Blackwell: SM100, SM103, SM110).
-
-    CuteDSL MoE NVFP4 kernels are optimized for SM100 architecture.
-    SM120+ (Rubin) may have different shared memory/TMEM configurations.
-    """
+def is_sm10x():
+    """Check for SM10x family (Blackwell: SM100, SM103; Rubin: SM107)."""
     if not torch.cuda.is_available():
         return False
     props = torch.cuda.get_device_properties(0)
@@ -51,9 +47,9 @@ def is_sm100_family():
 cute_dsl_available = pytest.mark.skipif(
     not is_cute_dsl_available(), reason="CuteDSL not available"
 )
-sm100_required = pytest.mark.skipif(
-    not is_sm100_family(),
-    reason="Requires SM100 family GPU (Blackwell: SM100, SM103, SM110)",
+sm10x_required = pytest.mark.skipif(
+    not is_sm10x(),
+    reason="Requires SM10x GPU (Blackwell or Rubin)",
 )
 
 
@@ -331,7 +327,7 @@ def check_accuracy(
 
 
 @cute_dsl_available
-@sm100_required
+@sm10x_required
 class TestCuteDslFusedMoeFunctional:
     """Tests for the functional API: cute_dsl_fused_moe_nvfp4."""
 
@@ -448,7 +444,7 @@ class TestCuteDslFusedMoeFunctional:
 
 
 @cute_dsl_available
-@sm100_required
+@sm10x_required
 class TestCuteDslMoEWrapper:
     """Tests for the wrapper API: CuteDslMoEWrapper."""
 
@@ -693,7 +689,7 @@ class TestCuteDslMoEWrapper:
 
 
 @cute_dsl_available
-@sm100_required
+@sm10x_required
 class TestApiConsistency:
     """Tests verifying consistency between functional and wrapper APIs."""
 
@@ -772,7 +768,7 @@ class TestApiConsistency:
 
 
 @cute_dsl_available
-@sm100_required
+@sm10x_required
 class TestExpertParallelism:
     """Tests for expert parallelism (EP) configurations."""
 
