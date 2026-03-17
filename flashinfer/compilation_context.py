@@ -66,7 +66,7 @@ class CompilationContext:
             )
 
         flags = []
-        for major, minor in supported_cuda_archs:
+        for major, minor in sorted(supported_cuda_archs):
             # When map_sm107_to_100f is True, SM107 (10, "7a") uses 100f flags
             # to match pre-compiled cubins that target the sm100f family base.
             if map_sm107_to_100f and major == 10 and minor == "7a":

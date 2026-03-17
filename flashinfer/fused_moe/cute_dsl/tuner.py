@@ -28,6 +28,7 @@ Reference: TensorRT-LLM/tensorrt_llm/_torch/custom_ops/cute_dsl_custom_ops.py
 """
 
 import itertools
+import logging
 from typing import Any, Callable, Dict, List, Tuple
 
 import torch
@@ -43,6 +44,8 @@ from ..utils import (
     get_last_power_of_2_num_tokens_buckets,
     last_positive_power_of_2,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -500,10 +503,13 @@ def print_all_tactics():
         ("Blackwell", ALL_BLACKWELL_MOE_TACTICS),
         ("Rubin", ALL_RUBIN_MOE_TACTICS),
     ]:
-        print(f"{label} MoE tactics: {len(tactics)}")
+        logger.info("%s MoE tactics: %d", label, len(tactics))
         for i, tactic in enumerate(tactics):
             tile_size, gemm1_tactic, gemm2_tactic = tactic
-            print(
-                f"  Tactic {i}: tile_size={tile_size}, gemm1={gemm1_tactic}, gemm2={gemm2_tactic}"
+            logger.info(
+                "  Tactic %d: tile_size=%s, gemm1=%s, gemm2=%s",
+                i,
+                tile_size,
+                gemm1_tactic,
+                gemm2_tactic,
             )
-        print()
