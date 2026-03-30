@@ -55,10 +55,10 @@ import torch
 
 from ...api_logging import flashinfer_api
 from ...autotuner import AutoTuner
+from ...utils import supported_compute_capability
 from .moe_utils import (
     allocate_moe_sort_buffers,
     get_max_num_permuted_tokens,
-    moe_output_memset,
     moe_sort,
 )
 from .blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion import (
@@ -149,7 +149,7 @@ def _moe_core_impl(
     This function handles:
     1. moe_sort: Token routing computation
     2. GEMM1 + SwiGLU: First projection with activation
-    3. Async moe_output_memset: Zero output buffer (overlapped with GEMM1)
+    3. Async output zero: Zero output buffer (overlapped with GEMM1)
     4. GEMM2 + Finalize: Second projection with atomic scatter
 
     Args:
@@ -189,12 +189,19 @@ def _moe_core_impl(
     num_tokens = token_selected_experts.size(0)
     hidden_size = w2_weight.size(1)
 
-    # Allocate output if not provided
+    # Allocate output if not provided.  The caller (wrapper or functional
+    # API) should pass a [:num_tokens] slice of the pre-allocated buffer
+    # when using CUDA graphs.  The buffer is zeroed in Step 3 below.
     if moe_output is None:
         moe_output = torch.empty(
             (num_tokens, hidden_size),
             dtype=output_dtype,
             device=x.device,
+        )
+    else:
+        assert moe_output.size(0) == num_tokens, (
+            f"moe_output must be sliced to num_tokens rows before calling "
+            f"_moe_core_impl (got {moe_output.size(0)}, expected {num_tokens})"
         )
 
     # Get stream resources if using async memset
@@ -265,28 +272,23 @@ def _moe_core_impl(
         )
     )
 
-    # Step 3: Async moe_output_memset on auxiliary stream
+    # Step 3: Zero the active output slice before GEMM2 finalize.
+    # Finalize uses atomic scatter-add into `moe_output`, so it must start
+    # from zero each call. We zero only the active slice, not the full
+    # preallocated buffer. We do not use `moe_output_memset` here because
+    # FlashInfer's port always invokes the sparse kernel, missing the
+    # TRT-LLM dispatch that falls back to cudaMemsetAsync (dense zero)
+    # when !enable_alltoall || ep_size <= top_k. A dense zero of the
+    # active slice is correct for all configurations.
+    # TODO: add the TRTLLM all-to-all and `moe_output_memset` behavior
     if use_async_memset:
-        max_num_permuted_tokens = get_max_num_permuted_tokens(
-            num_tokens, top_k, num_local_experts, tile_size
-        )
         with torch.cuda.stream(aux_stream):
             main_event.wait()
-            moe_output_memset(
-                output=moe_output,
-                tile_idx_to_mn_limit=tile_idx_to_mn_limit,
-                expanded_idx_to_permuted_idx=expanded_idx_to_permuted_idx,
-                permuted_idx_to_expanded_idx=permuted_idx_to_expanded_idx,
-                num_non_exiting_tiles=num_non_exiting_tiles,
-                max_num_permuted_tokens=max_num_permuted_tokens,
-                top_k=top_k,
-                tile_size=tile_size,
-            )
+            moe_output.zero_()
             memset_event.record()
         memset_event.wait()
     else:
-        # Simple zero without async
-        moe_output[:num_tokens].zero_()
+        moe_output.zero_()
 
     # Step 4: GEMM2 + Finalize
     blockscaled_contiguous_grouped_gemm_finalize_fusion_nvfp4(
@@ -323,6 +325,8 @@ class CuteDslMoEWrapper:
     enabling CUDA graph capture and replay. It also supports auto-tuning via
     the `tactic` parameter or by calling inside `autotune()` context.
 
+    Supported architectures: SM100, SM103.
+
     Attributes:
         num_experts: Total number of experts.
         top_k: Number of experts per token.
@@ -354,6 +358,7 @@ class CuteDslMoEWrapper:
         ...     output = moe.run(x, x_sf, topk_ids, topk_weights, w1, w1_sf, ...)
     """
 
+    @supported_compute_capability([100, 103])
     @flashinfer_api
     def __init__(
         self,
@@ -457,7 +462,8 @@ class CuteDslMoEWrapper:
             (scale_size,), dtype=torch.uint8, device=self.device
         )
 
-        # Final output
+        # Final output — sliced to [:num_tokens] before each forward pass,
+        # then zeroed before GEMM2 finalize, typically on aux_stream.
         self._moe_output = torch.empty(
             (self.max_num_tokens, self.hidden_size),
             dtype=self.output_dtype,
@@ -502,6 +508,10 @@ class CuteDslMoEWrapper:
         **kwargs,
     ) -> torch.Tensor:
         """Forward implementation called by auto-tuner."""
+        # Pre-allocated buffers are sized for self.tile_size. When the tactic
+        # uses a different tile_size (e.g. during autotune), fall back to
+        # dynamic allocation to avoid buffer overflow in moe_sort.
+        use_prealloc = self.use_cuda_graph and tile_size == self.tile_size
         return _moe_core_impl(
             x=x,
             x_sf=x_sf,
@@ -527,12 +537,13 @@ class CuteDslMoEWrapper:
             gemm1_mma_inst_shape=gemm1_mma_inst_shape,
             gemm2_mma_tiler=gemm2_mma_tiler,
             gemm2_mma_inst_shape=gemm2_mma_inst_shape,
-            moe_sort_buffers=self._moe_sort_buffers if self.use_cuda_graph else None,
-            gemm1_out=self._gemm1_output if self.use_cuda_graph else None,
-            gemm1_out_scale=self._gemm1_output_scale if self.use_cuda_graph else None,
+            moe_sort_buffers=self._moe_sort_buffers if use_prealloc else None,
+            gemm1_out=self._gemm1_output if use_prealloc else None,
+            gemm1_out_scale=self._gemm1_output_scale if use_prealloc else None,
             moe_output=moe_output
             if moe_output is not None
-            else (self._moe_output if self.use_cuda_graph else None),
+            # Slice the CUDA-graph buffer to the active batch.
+            else (self._moe_output[: x.shape[0]] if use_prealloc else None),
             aux_stream=self._aux_stream,
             main_event=self._main_event,
             memset_event=self._memset_event,
@@ -586,9 +597,10 @@ class CuteDslMoEWrapper:
                 f"num_tokens ({num_tokens}) exceeds max_num_tokens ({self.max_num_tokens})"
             )
 
-        # Allocate output buffer if not using pre-allocated one
+        # Slice the pre-allocated buffer to the active batch so that
+        # _moe_core_impl only zeros num_tokens rows, not max_num_tokens.
         if self.use_cuda_graph:
-            moe_output = self._moe_output
+            moe_output = self._moe_output[:num_tokens]
         else:
             moe_output = torch.empty(
                 (num_tokens, self.hidden_size),
@@ -703,6 +715,7 @@ def _cute_dsl_fused_moe_nvfp4_impl(
     )
 
 
+@supported_compute_capability([100, 103])
 @flashinfer_api
 def cute_dsl_fused_moe_nvfp4(
     x: torch.Tensor,
@@ -727,6 +740,8 @@ def cute_dsl_fused_moe_nvfp4(
     enable_pdl: bool = True,
 ) -> torch.Tensor:
     """Run fused MoE computation using CuteDSL NVFP4 kernels.
+
+    Supported architectures: SM100, SM103.
 
     This is the simple functional API. For CUDA graph support, use
     `CuteDslMoEWrapper` instead.

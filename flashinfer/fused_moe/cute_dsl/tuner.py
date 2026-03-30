@@ -75,10 +75,13 @@ def get_blackwell_gemm1_valid_tactics(tile_size: int) -> List[Tuple]:
 def get_blackwell_gemm2_valid_tactics(tile_size: int) -> List[Tuple]:
     """Get valid Blackwell tactics for GEMM2 (Finalize Fusion).
 
+    The finalize kernel uses use_2cta_instrs=False, so mma_tiler_mn M is
+    always 128 and cluster_shape_mn M is always 1, regardless of tile_size.
+
     Format: (mma_tiler_mn, cluster_shape_mn, raster_along_m)
     """
-    mma_tiler_mn_candidates = [(tile_size, 128), (tile_size, 256)]
-    cluster_shape_mn_candidates = [(tile_size // 128, 1), (tile_size // 128, 2)]
+    mma_tiler_mn_candidates = [(128, 128), (128, 256)]
+    cluster_shape_mn_candidates = [(1, 1), (1, 2)]
     raster_along_m_candidates = [False]
 
     return [
@@ -97,9 +100,13 @@ def get_blackwell_moe_valid_tactics() -> List[Tuple]:
     Returns: List of (tile_size, gemm1_tactic, gemm2_tactic)
     """
     tactics = []
-    for tile_size in [128, 256]:
+    # Only tile_size=128 is enabled. tile_size=256 (use_2cta_instrs=True)
+    # produces incorrect results in the GEMM1 gather+SwiGLU kernel and is
+    # disabled until the kernel bug is fixed.
+    for tile_size in [128]:
         gemm1_tactics = get_blackwell_gemm1_valid_tactics(tile_size)
         gemm2_tactics = get_blackwell_gemm2_valid_tactics(tile_size)
+
         for gemm1_tactic, gemm2_tactic in itertools.product(
             gemm1_tactics, gemm2_tactics
         ):
@@ -426,8 +433,99 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
         inputs: List[torch.Tensor],
         profile: OptimizationProfile,
     ) -> List[Tuple[Any, ...]]:
-        """Return valid tactics for the current GPU architecture."""
-        return _get_arch_tactics()
+        """Return valid tactics filtered by can_implement checks.
+
+        Validates each candidate tactic against both GEMM1 and GEMM2 kernel
+        can_implement methods using the actual problem dimensions from inputs.
+        Supports both Blackwell and Rubin architectures.
+        """
+        import cutlass
+        from .moe_utils import get_max_num_permuted_tokens
+
+        x = inputs[0]
+        w1_weight = inputs[4]
+
+        num_tokens = x.shape[0]
+        hidden_size = x.shape[1] * 2  # FP4 packed
+        num_local_experts = w1_weight.shape[0]
+        intermediate_size = w1_weight.shape[1] // 2  # gate+up fused
+
+        ab_dtype = cutlass.Float4E2M1FN
+        sf_dtype = cutlass.Float8E4M3FN
+        sf_vec_size = 16
+        gemm1_c_dtype = cutlass.Float4E2M1FN
+        gemm2_out_dtype = cutlass.BFloat16
+
+        all_tactics = _get_arch_tactics()
+        valid_tactics = []
+
+        for tactic in all_tactics:
+            tile_size, gemm1_tactic, gemm2_tactic = tactic
+            permuted_m = get_max_num_permuted_tokens(
+                num_tokens, self.top_k, self.num_local_experts, tile_size
+            )
+
+            if _is_rubin_tactic(tactic):
+                from .rubin import (
+                    Sm107BlockScaledContiguousGatherGroupedGemmSwigluFusionKernel,
+                    Sm107BlockScaledContiguousGroupedGemmFinalizeFusionKernel,
+                )
+                gemm1_mma_tiler, gemm1_mma_inst_shape, gemm1_cluster_shape_mn, _ = gemm1_tactic
+                gemm2_mma_tiler, gemm2_mma_inst_shape, gemm2_cluster_shape_mn, _ = gemm2_tactic
+
+                gemm1_ok = Sm107BlockScaledContiguousGatherGroupedGemmSwigluFusionKernel.can_implement(
+                    a_dtype=ab_dtype, b_dtype=ab_dtype, sf_dtype=sf_dtype,
+                    sf_vec_size=sf_vec_size, c_dtype=gemm1_c_dtype,
+                    mma_inst_shape=gemm1_mma_inst_shape, mma_tiler=gemm1_mma_tiler,
+                    cluster_shape_mn=gemm1_cluster_shape_mn,
+                    m=permuted_m, n=2 * intermediate_size, k=hidden_size,
+                    l=num_local_experts, a_major="k", b_major="k", c_major="n",
+                )
+                gemm2_ok = Sm107BlockScaledContiguousGroupedGemmFinalizeFusionKernel.can_implement(
+                    a_dtype=ab_dtype, b_dtype=ab_dtype, sf_dtype=sf_dtype,
+                    sf_vec_size=sf_vec_size, c_dtype=gemm2_out_dtype,
+                    mma_inst_shape=gemm2_mma_inst_shape, mma_tiler=gemm2_mma_tiler,
+                    cluster_shape_mn=gemm2_cluster_shape_mn,
+                    m=permuted_m, n=hidden_size, k=intermediate_size,
+                    l=num_local_experts, a_major="k", b_major="k", c_major="n",
+                )
+            else:
+                from .blackwell import (
+                    BlockScaledContiguousGatherGroupedGemmKernel,
+                    Sm100BlockScaledContiguousGroupedGemmFinalizeFusionKernel,
+                )
+                gemm1_mma_tiler_mn, gemm1_cluster_shape_mn, _ = gemm1_tactic
+                gemm2_mma_tiler_mn, gemm2_cluster_shape_mn, _ = gemm2_tactic
+
+                gemm1_ok = BlockScaledContiguousGatherGroupedGemmKernel.can_implement(
+                    ab_dtype=ab_dtype, sf_dtype=sf_dtype, sf_vec_size=sf_vec_size,
+                    c_dtype=gemm1_c_dtype, mma_tiler_mn=gemm1_mma_tiler_mn,
+                    cluster_shape_mn=gemm1_cluster_shape_mn,
+                    m=permuted_m, n=2 * intermediate_size, k=hidden_size,
+                    l=num_local_experts, a_major="k", b_major="k", c_major="n",
+                )
+                gemm2_ok = Sm100BlockScaledContiguousGroupedGemmFinalizeFusionKernel.can_implement(
+                    ab_dtype=ab_dtype, sf_dtype=sf_dtype, sf_vec_size=sf_vec_size,
+                    out_dtype=gemm2_out_dtype, mma_tiler_mn=gemm2_mma_tiler_mn,
+                    cluster_shape_mn=gemm2_cluster_shape_mn,
+                    m=permuted_m, n=hidden_size, k=intermediate_size,
+                    l=num_local_experts, a_major="k", b_major="k", out_major="n",
+                )
+
+            if gemm1_ok and gemm2_ok:
+                valid_tactics.append(tactic)
+
+        if not valid_tactics:
+            logger.warning(
+                "No valid tactics found for problem dims "
+                "(tokens=%d, hidden=%d, intermediate=%d, experts=%d, top_k=%d). "
+                "Falling back to default tactic.",
+                num_tokens, hidden_size, intermediate_size,
+                num_local_experts, self.top_k,
+            )
+            valid_tactics = [_get_default_tactic()]
+
+        return valid_tactics
 
     def forward(  # type: ignore[override]
         self,

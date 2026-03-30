@@ -51,7 +51,6 @@ import cuda.bindings.driver as cuda
 import torch
 
 from flashinfer.utils import get_compute_capability
-from flashinfer.api_logging import flashinfer_api
 from flashinfer.cute_dsl.utils import (
     get_cutlass_dtype,
     cutlass_to_torch_dtype,
@@ -314,7 +313,6 @@ def _get_compiled_gather_kernel(
     return _gather_kernel_cache[cache_key]
 
 
-@flashinfer_api
 def blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_nvfp4(
     a: torch.Tensor,
     b: torch.Tensor,
