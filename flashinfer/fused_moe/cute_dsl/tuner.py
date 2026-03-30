@@ -470,46 +470,86 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
                     Sm107BlockScaledContiguousGatherGroupedGemmSwigluFusionKernel,
                     Sm107BlockScaledContiguousGroupedGemmFinalizeFusionKernel,
                 )
-                gemm1_mma_tiler, gemm1_mma_inst_shape, gemm1_cluster_shape_mn, _ = gemm1_tactic
-                gemm2_mma_tiler, gemm2_mma_inst_shape, gemm2_cluster_shape_mn, _ = gemm2_tactic
+
+                gemm1_mma_tiler, gemm1_mma_inst_shape, gemm1_cluster_shape_mn, _ = (
+                    gemm1_tactic
+                )
+                gemm2_mma_tiler, gemm2_mma_inst_shape, gemm2_cluster_shape_mn, _ = (
+                    gemm2_tactic
+                )
 
                 gemm1_ok = Sm107BlockScaledContiguousGatherGroupedGemmSwigluFusionKernel.can_implement(
-                    a_dtype=ab_dtype, b_dtype=ab_dtype, sf_dtype=sf_dtype,
-                    sf_vec_size=sf_vec_size, c_dtype=gemm1_c_dtype,
-                    mma_inst_shape=gemm1_mma_inst_shape, mma_tiler=gemm1_mma_tiler,
+                    a_dtype=ab_dtype,
+                    b_dtype=ab_dtype,
+                    sf_dtype=sf_dtype,
+                    sf_vec_size=sf_vec_size,
+                    c_dtype=gemm1_c_dtype,
+                    mma_inst_shape=gemm1_mma_inst_shape,
+                    mma_tiler=gemm1_mma_tiler,
                     cluster_shape_mn=gemm1_cluster_shape_mn,
-                    m=permuted_m, n=2 * intermediate_size, k=hidden_size,
-                    l=num_local_experts, a_major="k", b_major="k", c_major="n",
+                    m=permuted_m,
+                    n=2 * intermediate_size,
+                    k=hidden_size,
+                    l=num_local_experts,
+                    a_major="k",
+                    b_major="k",
+                    c_major="n",
                 )
                 gemm2_ok = Sm107BlockScaledContiguousGroupedGemmFinalizeFusionKernel.can_implement(
-                    a_dtype=ab_dtype, b_dtype=ab_dtype, sf_dtype=sf_dtype,
-                    sf_vec_size=sf_vec_size, c_dtype=gemm2_out_dtype,
-                    mma_inst_shape=gemm2_mma_inst_shape, mma_tiler=gemm2_mma_tiler,
+                    a_dtype=ab_dtype,
+                    b_dtype=ab_dtype,
+                    sf_dtype=sf_dtype,
+                    sf_vec_size=sf_vec_size,
+                    c_dtype=gemm2_out_dtype,
+                    mma_inst_shape=gemm2_mma_inst_shape,
+                    mma_tiler=gemm2_mma_tiler,
                     cluster_shape_mn=gemm2_cluster_shape_mn,
-                    m=permuted_m, n=hidden_size, k=intermediate_size,
-                    l=num_local_experts, a_major="k", b_major="k", c_major="n",
+                    m=permuted_m,
+                    n=hidden_size,
+                    k=intermediate_size,
+                    l=num_local_experts,
+                    a_major="k",
+                    b_major="k",
+                    c_major="n",
                 )
             else:
                 from .blackwell import (
                     BlockScaledContiguousGatherGroupedGemmKernel,
                     Sm100BlockScaledContiguousGroupedGemmFinalizeFusionKernel,
                 )
+
                 gemm1_mma_tiler_mn, gemm1_cluster_shape_mn, _ = gemm1_tactic
                 gemm2_mma_tiler_mn, gemm2_cluster_shape_mn, _ = gemm2_tactic
 
                 gemm1_ok = BlockScaledContiguousGatherGroupedGemmKernel.can_implement(
-                    ab_dtype=ab_dtype, sf_dtype=sf_dtype, sf_vec_size=sf_vec_size,
-                    c_dtype=gemm1_c_dtype, mma_tiler_mn=gemm1_mma_tiler_mn,
+                    ab_dtype=ab_dtype,
+                    sf_dtype=sf_dtype,
+                    sf_vec_size=sf_vec_size,
+                    c_dtype=gemm1_c_dtype,
+                    mma_tiler_mn=gemm1_mma_tiler_mn,
                     cluster_shape_mn=gemm1_cluster_shape_mn,
-                    m=permuted_m, n=2 * intermediate_size, k=hidden_size,
-                    l=num_local_experts, a_major="k", b_major="k", c_major="n",
+                    m=permuted_m,
+                    n=2 * intermediate_size,
+                    k=hidden_size,
+                    l=num_local_experts,
+                    a_major="k",
+                    b_major="k",
+                    c_major="n",
                 )
                 gemm2_ok = Sm100BlockScaledContiguousGroupedGemmFinalizeFusionKernel.can_implement(
-                    ab_dtype=ab_dtype, sf_dtype=sf_dtype, sf_vec_size=sf_vec_size,
-                    out_dtype=gemm2_out_dtype, mma_tiler_mn=gemm2_mma_tiler_mn,
+                    ab_dtype=ab_dtype,
+                    sf_dtype=sf_dtype,
+                    sf_vec_size=sf_vec_size,
+                    out_dtype=gemm2_out_dtype,
+                    mma_tiler_mn=gemm2_mma_tiler_mn,
                     cluster_shape_mn=gemm2_cluster_shape_mn,
-                    m=permuted_m, n=hidden_size, k=intermediate_size,
-                    l=num_local_experts, a_major="k", b_major="k", out_major="n",
+                    m=permuted_m,
+                    n=hidden_size,
+                    k=intermediate_size,
+                    l=num_local_experts,
+                    a_major="k",
+                    b_major="k",
+                    out_major="n",
                 )
 
             if gemm1_ok and gemm2_ok:
@@ -520,8 +560,11 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
                 "No valid tactics found for problem dims "
                 "(tokens=%d, hidden=%d, intermediate=%d, experts=%d, top_k=%d). "
                 "Falling back to default tactic.",
-                num_tokens, hidden_size, intermediate_size,
-                num_local_experts, self.top_k,
+                num_tokens,
+                hidden_size,
+                intermediate_size,
+                num_local_experts,
+                self.top_k,
             )
             valid_tactics = [_get_default_tactic()]
 

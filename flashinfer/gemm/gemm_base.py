@@ -17,7 +17,7 @@ limitations under the License.
 import functools
 from enum import Enum
 from types import SimpleNamespace
-from typing import List, Literal, Optional, Tuple
+from typing import Callable, List, Literal, Optional, Tuple
 
 from flashinfer.trtllm_low_latency_gemm import trtllm_low_latency_gemm
 import torch
@@ -4661,8 +4661,8 @@ def _cute_dsl_gemm_fp4_runner(
                             mma_inst_shape_k,
                         )
 
-                        for cluster_shape_mn in cluster_shape_mn_candidates:
-                            for swap_ab in swap_ab_candidates:
+                        for cluster_shape_mn in _SM100_CLUSTER_SHAPE_MN_CANDIDATES:
+                            for swap_ab in (False, True):
                                 if not swap_ab and not n_aligned:
                                     continue
                                 if swap_ab and not m_aligned:
@@ -4789,6 +4789,7 @@ def _cute_dsl_gemm_fp4_runner(
                 out_dtype,
             )
 
+            make_kernel: Callable
             if kernel_type == "sm107" and Sm107Kernel is not None:
                 sm107_params = (
                     use_tma_store  # repurposed: (inst_m, inst_n, inst_k, tiler_k)

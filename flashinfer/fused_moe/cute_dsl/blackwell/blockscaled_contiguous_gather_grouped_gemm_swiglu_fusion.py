@@ -38,6 +38,7 @@ import cutlass.utils.blackwell_helpers as sm100_utils
 import cutlass.utils.blockscaled_layout as blockscaled_utils
 from cutlass._mlir.dialects import math
 from cutlass.cute.nvgpu import cpasync, tcgen05
+from cutlass.cutlass_dsl import Int32
 
 from .custom_pipeline import PipelineCpAsyncUmma
 from .utils import (
