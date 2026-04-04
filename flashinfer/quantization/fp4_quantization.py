@@ -29,6 +29,7 @@ from ..jit import (
     sm120a_nvcc_flags,
     sm120f_nvcc_flags,
     sm110a_nvcc_flags,
+    sm107a_nvcc_flags,
     sm103a_nvcc_flags,
     sm100a_nvcc_flags,
     sm90a_nvcc_flags,
@@ -90,6 +91,9 @@ def gen_fp4_quantization_sm100_module() -> JitSpec:
 def gen_fp4_quantization_sm103_module() -> JitSpec:
     return gen_fp4_quantization_module(sm103a_nvcc_flags, "103")
 
+def gen_fp4_quantization_sm107_module() -> JitSpec:
+    return gen_fp4_quantization_module(sm107a_nvcc_flags, "107")
+
 
 def gen_fp4_quantization_sm90_module() -> JitSpec:
     return gen_fp4_quantization_module(sm90a_nvcc_flags, "90")
@@ -149,6 +153,7 @@ def get_fp4_quantization_module(backend: str = "100"):
         "120f": gen_fp4_quantization_sm120f_module,
         "120": gen_fp4_quantization_sm120_module,
         "110": gen_fp4_quantization_sm110_module,
+        "107": gen_fp4_quantization_sm107_module,
         "103": gen_fp4_quantization_sm103_module,
         "100": gen_fp4_quantization_sm100_module,
         "90": gen_fp4_quantization_sm90_module,
