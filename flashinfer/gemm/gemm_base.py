@@ -3503,7 +3503,7 @@ def _check_mm_mxfp8_problem_size(
     return True
 
 
-@supported_compute_capability([100, 103, 110, 120, 121])
+@supported_compute_capability([100, 103, 107, 110, 120, 121])
 def _cutlass_gemm_mxfp8_requirement(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -3526,7 +3526,7 @@ def _cutlass_gemm_mxfp8_requirement(
     return True
 
 
-@supported_compute_capability([100, 103])
+@supported_compute_capability([100, 103, 107])
 def _trtllm_gemm_mxfp8_requirement(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -3547,7 +3547,7 @@ def _trtllm_gemm_mxfp8_requirement(
     return True
 
 
-@supported_compute_capability([100, 103])
+@supported_compute_capability([100, 103, 107])
 def _cute_dsl_gemm_mxfp8_requirement(
     a: torch.Tensor,  # unused
     b: torch.Tensor,  # unused
