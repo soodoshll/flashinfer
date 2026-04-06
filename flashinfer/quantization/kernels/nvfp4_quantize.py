@@ -180,6 +180,7 @@ class NVFP4QuantizeLinearKernel:
             block=[threads_per_block, 1, 1],
             max_number_threads=[_MAX_THREADS_PER_BLOCK, 1, 1],
             min_blocks_per_mp=_BLOCKS_PER_SM,
+            smem=0,
             stream=stream,
             use_pdl=self.enable_pdl,
         )
@@ -342,6 +343,7 @@ class NVFP4QuantizeSwizzledKernel:
             block=[self.num_threads, 1, 1],
             max_number_threads=[_MAX_THREADS_PER_BLOCK, 1, 1],
             min_blocks_per_mp=_BLOCKS_PER_SM,
+            smem=0,
             stream=stream,
             use_pdl=self.enable_pdl,
         )
@@ -767,6 +769,7 @@ class NVFP4QuantizeTMAKernel:
                 1,
             ],  # __launch_bounds__(288, 2)
             min_blocks_per_mp=2,
+            smem=self.shared_storage.size_in_bytes(),  # type: ignore[attr-defined]
             cluster=(*self.cluster_shape_mn, 1),
             stream=stream,
             use_pdl=self.enable_pdl,
