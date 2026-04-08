@@ -379,7 +379,7 @@ struct TllmGenSelectKernelParams {
         // Note the CgaSmemReduction will be enabled based on the heuristic.
         ,
         mMultiCtasKvMode(params.mMultiCtasKvMode ? MultiCtasKvMode::GmemReduction
-                                                : MultiCtasKvMode::Disabled),
+                                                 : MultiCtasKvMode::Disabled),
         mForceGmemReduction(false),
         mMaskType(params.mMaskType),
         mNumTokensPerPage(params.mNumTokensPerPage),
