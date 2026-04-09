@@ -367,7 +367,7 @@ def gen_gemm_sm100_module_cutlass_mxfp8() -> JitSpec:
                 write_if_different(dest_path, source)
 
     nvcc_flags = current_compilation_context.get_nvcc_flags_list(
-        supported_major_versions=[10, 11]
+        supported_major_versions=[10, 11], map_sm107_to_100f=True
     )
     return gen_jit_spec(
         "mxfp8_gemm_cutlass",
