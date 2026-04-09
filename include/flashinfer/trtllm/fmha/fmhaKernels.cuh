@@ -196,7 +196,7 @@ class TllmGenFmhaKernel {
                   kernelMeta.mHeadDimPerCtaV, kernelMeta.mHeadDimQk, kernelMeta.mHeadDimV,
                   kernelMeta.mTileSizeQ, kernelMeta.mTileSizeKv, kernelMeta.mNumTokensPerPage,
                   kernelMeta.mReuseSmemKForV, kernelMeta.m2CtaMma, kernelMeta.mSparseMla,
-                  kernelMeta.mSkipsSoftmaxWhenPossible, kernelMeta.mUseFp16Softmax);
+                  kernelMeta.mSkipsSoftmaxWhenPossible, kernelMeta.mFp16Softmax);
   }
 
   std::pair<bool, std::string> checkIfKernelExist(RunnerParams const& params) const {
@@ -835,7 +835,8 @@ class TllmGenFmhaKernel {
         ", reuseSmemKForV=" + std::to_string(selectKernelParams.mReuseSmemKForV) +
         ", uses2CtaMma=" + std::to_string(selectKernelParams.mUses2CtaMma) +
         ", sparseMla=" + std::to_string(params.mSparseMla) +
-        ", skipsSoftmax=" + std::to_string(selectKernelParams.mSkipsSoftmaxWhenPossible);
+        ", skipsSoftmax=" + std::to_string(selectKernelParams.mSkipsSoftmaxWhenPossible) +
+        ", fp16Softmax=" + std::to_string(selectKernelParams.mUseFp16Softmax);
     IKL_LOG_DEBUG(
         "Searching for kernel traits (%d available) in TllmGenFmhaKernel(%s, %s, %s, %d) %s",
         getNumLoadedKernels(), toStr(mDtypeQ), toStr(mDtypeKv), toStr(mDtypeOut), mSM,

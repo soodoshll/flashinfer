@@ -371,6 +371,8 @@ struct TllmGenSelectKernelParams {
   int mTileSizeKv;
   // Use 2 CTA MMA or not.
   bool mUses2CtaMma;
+  // Use FP16 softmax or not.
+  bool mUseFp16Softmax;
 
   // The constructor.
   TllmGenSelectKernelParams(TllmGenFmhaRunnerParams params)
@@ -389,5 +391,6 @@ struct TllmGenSelectKernelParams {
         mTileScheduler(params.mTileScheduler),
         mTileSizeQ(128),
         mTileSizeKv(128),
-        mUses2CtaMma(false) {};
+        mUses2CtaMma(false),
+        mUseFp16Softmax(false) {};
 };
