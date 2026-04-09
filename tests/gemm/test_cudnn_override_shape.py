@@ -44,10 +44,10 @@ def _skip_if_override_shape_not_supported():
         )
 
 
-def _skip_if_not_sm100_or_sm103():
+def _skip_if_not_sm100_or_sm103_or_sm107():
     major, minor = get_compute_capability(torch.device("cuda"))
-    if major * 10 + minor not in [100, 103]:
-        pytest.skip("override-shape GEMM requires SM100 or SM103")
+    if major * 10 + minor not in [100, 103, 107]:
+        pytest.skip("override-shape GEMM requires SM100, SM103, or SM107")
 
 
 # ============================================================================
@@ -74,7 +74,7 @@ class TestCudnnBf16OverrideShape:
     def test_bf16_override_shape_dynamic_m(self, cache_m, dynamic_ms, n, k):
         _skip_if_no_cudnn()
         _skip_if_override_shape_not_supported()
-        _skip_if_not_sm100_or_sm103()
+        _skip_if_not_sm100_or_sm103_or_sm107()
 
         from flashinfer.gemm.gemm_base import _torch_data_type_to_cudnn_data_type
 
@@ -141,7 +141,7 @@ class TestCudnnNVFp4OverrideShape:
     def test_nvfp4_override_shape_dynamic_m(self, cache_m, dynamic_ms, n, k):
         _skip_if_no_cudnn()
         _skip_if_override_shape_not_supported()
-        _skip_if_not_sm100_or_sm103()
+        _skip_if_not_sm100_or_sm103_or_sm107()
 
         import cudnn
 
@@ -248,7 +248,7 @@ class TestCudnnMXFp8OverrideShape:
     def test_mxfp8_override_shape_dynamic_m(self, cache_m, dynamic_ms, n, k):
         _skip_if_no_cudnn()
         _skip_if_override_shape_not_supported()
-        _skip_if_not_sm100_or_sm103()
+        _skip_if_not_sm100_or_sm103_or_sm107()
 
         import cudnn
         from flashinfer.gemm.gemm_base import _torch_data_type_to_cudnn_data_type
