@@ -190,7 +190,10 @@ def get_rubin_gemm2_valid_tactics(tile_size: int) -> List[Tuple]:
         (512, 256),
     ]
     mma_n_candidates = [128, 256]
-    cluster_shape_mn_candidates = [(1, 1), (2, 1), (1, 2), (2, 2)]
+    # Restrict to cluster_shape_n=1 only. The Rubin finalize kernel
+    # triggers illegal memory accesses with cluster_shape_n>1 at
+    # larger token counts (non-deterministic, routing-dependent).
+    cluster_shape_mn_candidates = [(1, 1), (2, 1)]
     raster_along_m_candidates = [False]
 
     valid_tactics = []
@@ -229,7 +232,11 @@ def get_rubin_moe_valid_tactics() -> List[Tuple]:
     Returns: List of (tile_size, gemm1_tactic, gemm2_tactic)
     """
     tactics = []
-    for tile_size in [128, 256]:
+    # Only tile_size=128 is enabled. tile_size=256 with B-reuse causes
+    # illegal memory accesses for certain GEMM2 tactic configurations and
+    # is disabled until the kernel bug is fixed (mirrors the Blackwell
+    # restriction in get_blackwell_moe_valid_tactics).
+    for tile_size in [128]:
         gemm1_tactics = get_rubin_gemm1_valid_tactics(tile_size)
         gemm2_tactics = get_rubin_gemm2_valid_tactics(tile_size)
         for gemm1_tactic, gemm2_tactic in itertools.product(

@@ -358,7 +358,7 @@ class CuteDslMoEWrapper:
         ...     output = moe.run(x, x_sf, topk_ids, topk_weights, w1, w1_sf, ...)
     """
 
-    @supported_compute_capability([100, 103])
+    @supported_compute_capability([100, 103, 107])
     @flashinfer_api
     def __init__(
         self,
@@ -715,7 +715,7 @@ def _cute_dsl_fused_moe_nvfp4_impl(
     )
 
 
-@supported_compute_capability([100, 103])
+@supported_compute_capability([100, 103, 107])
 @flashinfer_api
 def cute_dsl_fused_moe_nvfp4(
     x: torch.Tensor,
