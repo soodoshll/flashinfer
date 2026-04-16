@@ -373,6 +373,8 @@ struct TllmGenSelectKernelParams {
   bool mUses2CtaMma;
   // Use FP16 softmax or not.
   bool mUseFp16Softmax;
+  // Use spcompress or not.
+  bool mUsesSpcompress;
 
   // The constructor.
   TllmGenSelectKernelParams(TllmGenFmhaRunnerParams params)
@@ -392,5 +394,6 @@ struct TllmGenSelectKernelParams {
         mTileSizeQ(128),
         mTileSizeKv(128),
         mUses2CtaMma(false),
-        mUseFp16Softmax(false) {};
+        mUseFp16Softmax(false),
+        mUsesSpcompress(false) {};
 };
