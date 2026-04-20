@@ -21,6 +21,7 @@ from . import env as jit_env
 from .core import (
     sm100a_nvcc_flags,
     sm103a_nvcc_flags,
+    sm107a_nvcc_flags,
     sm90a_nvcc_flags,
     sm110a_nvcc_flags,
     sm120a_nvcc_flags,
@@ -67,6 +68,10 @@ def gen_fp4_quantization_sm100_module() -> JitSpec:
 
 def gen_fp4_quantization_sm103_module() -> JitSpec:
     return gen_fp4_quantization_module(sm103a_nvcc_flags, "103")
+
+
+def gen_fp4_quantization_sm107_module() -> JitSpec:
+    return gen_fp4_quantization_module(sm107a_nvcc_flags, "107")
 
 
 def gen_fp4_quantization_sm90_module() -> JitSpec:

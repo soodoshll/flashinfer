@@ -2050,6 +2050,8 @@ class TrtllmGenDecodeModule:
             value_block_scales,
             skip_softmax_threshold_scale_factor,
             uses_shared_paged_kv_idx,
+            None,  # use_fp16_softmax — not surfaced through wrapper API yet
+            None,  # uses_spcompress — not surfaced through wrapper API yet
         )
         return out
 
@@ -2231,6 +2233,8 @@ def trtllm_batch_decode_with_kv_cache(
     skip_softmax_threshold_scale_factor: Optional[float] = None,
     kv_cache_sf: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     uses_shared_paged_kv_idx: bool = True,
+    use_fp16_softmax: Optional[bool] = None,
+    uses_spcompress: Optional[bool] = None,
 ) -> Union[torch.Tensor, FP4Tensor]:
     """
     Parameters
@@ -2328,6 +2332,14 @@ def trtllm_batch_decode_with_kv_cache(
         Whether the K and V page indices are shared as a unified index.
         True (default) uses vLLM/FlashInfer layout with a 2D page table.
         False uses TRT-LLM layout with a 3D page table ``[batch_size, 2, max_num_pages_per_seq]``.
+
+    use_fp16_softmax : Optional[bool] = None
+        Select the ``…Fp16Softmax…`` cubin variant (FP16 softmax accumulator).
+        Currently only shipped for BF16 Q/KV/O kernels (trtllm-gen backend).
+
+    uses_spcompress : Optional[bool] = None
+        Select the ``…Spcomp…`` cubin variant (sparse compression).
+        Currently only shipped for FP8 Q kernels (trtllm-gen backend).
 
     Returns
     -------
@@ -2556,6 +2568,8 @@ def trtllm_batch_decode_with_kv_cache(
             v_block_scales,
             skip_softmax_threshold_scale_factor,
             uses_shared_paged_kv_idx,
+            use_fp16_softmax,
+            uses_spcompress,
         )
 
         return (

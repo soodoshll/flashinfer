@@ -296,6 +296,10 @@ struct TllmGenFmhaRunnerParams {
   bool mSkipsSoftmaxWhenPossible;
   // Skip softmax threshold scale factor.
   float mSkipSoftmaxThresholdScaleFactor;
+  // Whether to use FP16 softmax accumulator (BF16 kernels only).
+  bool mUseFp16Softmax;
+  // Whether to use the sparse-compression kernel variants (FP8 Q kernels only).
+  bool mUsesSpcompress;
   // Whether to use sparse MLA.
   bool mSparseMla;
   // The top k value for sparse MLA.
@@ -394,6 +398,6 @@ struct TllmGenSelectKernelParams {
         mTileSizeQ(128),
         mTileSizeKv(128),
         mUses2CtaMma(false),
-        mUseFp16Softmax(false),
-        mUsesSpcompress(false) {};
+        mUseFp16Softmax(params.mUseFp16Softmax),
+        mUsesSpcompress(params.mUsesSpcompress) {};
 };

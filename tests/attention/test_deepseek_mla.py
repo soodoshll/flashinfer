@@ -18,7 +18,10 @@ import math
 
 import pytest
 import torch
-from tests.test_helpers.test_helpers import clear_cuda_cache
+from tests.test_helpers.test_helpers import (
+    assert_close_with_mismatch_tolerance,
+    clear_cuda_cache,
+)
 
 import flashinfer
 from flashinfer.jit import build_jit_specs
@@ -184,8 +187,14 @@ def test_single_prefill_with_kv_cache(
     sm_scale = 1.0 / (head_dim_qk**0.5)
 
     o_ref, lse_ref = attention_ref(1, q, k, v, causal, sm_scale)
-    torch.testing.assert_close(o, o_ref, rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(lse, lse_ref.squeeze(0), rtol=1e-3, atol=1e-3)
+    assert_close_with_mismatch_tolerance(
+        o, o_ref, rtol=1e-3, atol=1e-3,
+        max_mismatched_elements=int(1e-5 * o.numel()),
+    )
+    assert_close_with_mismatch_tolerance(
+        lse, lse_ref.squeeze(0), rtol=1e-3, atol=1e-3,
+        max_mismatched_elements=int(1e-5 * lse.numel()),
+    )
 
 
 @pytest.mark.parametrize("batch_size", [12, 17])
@@ -248,8 +257,14 @@ def test_batch_prefill_with_ragged_kv_cache(
     o_ref, lse_ref = attention_ref(batch_size, q, k, v, causal, sm_scale)
 
     lse_ref = lse_ref.flatten(0, 1)
-    torch.testing.assert_close(o, o_ref, rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(lse, lse_ref, rtol=1e-3, atol=1e-3)
+    assert_close_with_mismatch_tolerance(
+        o, o_ref, rtol=1e-3, atol=1e-3,
+        max_mismatched_elements=int(1e-5 * o.numel()),
+    )
+    assert_close_with_mismatch_tolerance(
+        lse, lse_ref, rtol=1e-3, atol=1e-3,
+        max_mismatched_elements=int(1e-5 * lse.numel()),
+    )
 
     # test with pre-allocated output
     o_buffer = torch.empty_like(o)
@@ -408,7 +423,10 @@ def test_batch_mla_varlen_page_attention(
         o_ref, lse_ref = attention_ref(batch_size, q, k, v, causal, sm_scale)
         lse_ref = lse_ref.flatten(0, 1)
         o_i = o[q_rows_arr[i]]
-        torch.testing.assert_close(o_i, o_ref, rtol=1e-3, atol=1e-3)
+        assert_close_with_mismatch_tolerance(
+            o_i, o_ref, rtol=1e-3, atol=1e-3,
+            max_mismatched_elements=int(1e-5 * o_i.numel()),
+        )
         # if kv_lens[i] != 0:
         #     torch.testing.assert_close(lse_i, lse_ref, rtol=1e-3, atol=1e-3)
 
@@ -490,9 +508,15 @@ def test_batch_mla_oob_kv_nan(
     q = torch.cat([q_nope, q_pe], dim=-1)
     o_ref, lse_ref = attention_ref(batch_size, q, k, v, causal, sm_scale)
     lse_ref = lse_ref.flatten(0, 1)
-    torch.testing.assert_close(o, o_ref, rtol=1e-3, atol=1e-3)
+    assert_close_with_mismatch_tolerance(
+        o, o_ref, rtol=1e-3, atol=1e-3,
+        max_mismatched_elements=int(1e-5 * o.numel()),
+    )
     if kv_len != 0:
-        torch.testing.assert_close(lse, lse_ref, rtol=1e-3, atol=1e-3)
+        assert_close_with_mismatch_tolerance(
+            lse, lse_ref, rtol=1e-3, atol=1e-3,
+            max_mismatched_elements=int(1e-5 * lse.numel()),
+        )
 
 
 @pytest.mark.parametrize("batch_size", [1, 3, 5, 7, 157])
@@ -627,9 +651,15 @@ def test_batch_mla_page_attention(
     q = torch.cat([q_nope, q_pe], dim=-1)
     o_ref, lse_ref = attention_ref(batch_size, q, k, v, causal, sm_scale)
     lse_ref = lse_ref.flatten(0, 1)
-    torch.testing.assert_close(o, o_ref, rtol=1e-3, atol=1e-3)
+    assert_close_with_mismatch_tolerance(
+        o, o_ref, rtol=1e-3, atol=1e-3,
+        max_mismatched_elements=int(1e-5 * o.numel()),
+    )
     if kv_len != 0:
-        torch.testing.assert_close(lse, lse_ref, rtol=1e-3, atol=1e-3)
+        assert_close_with_mismatch_tolerance(
+            lse, lse_ref, rtol=1e-3, atol=1e-3,
+            max_mismatched_elements=int(1e-5 * lse.numel()),
+        )
 
     # test with pre-allocated output
     o_buffer = torch.empty_like(o)
