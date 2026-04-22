@@ -32,7 +32,10 @@ pip3 install responses pytest scipy build cuda-python nvshmem4py-cu12
 if [[ "$CUDA_VERSION" == *"cu13"* ]]; then
   pip3 install --upgrade cuda-python==13.0
   pip3 install --upgrade nvidia-cudnn-cu13
-  pip3 install --upgrade "nvidia-cutlass-dsl[cu13]>=4.4.2"
+  # Rubin (sm_107a) needs the internal cute-dsl wheel; the public nvidia-cutlass-dsl
+  # fails JIT with `-arch=compute_a is an unsupported option`.
+  pip3 install --upgrade nvidia-cutlass-dsl-internal \
+    --extra-index-url https://urm.nvidia.com/artifactory/api/pypi/nv-shared-pypi-local/simple
 else
   pip3 install --upgrade cuda-python==12.*
   pip3 install --upgrade nvidia-cudnn-cu12
