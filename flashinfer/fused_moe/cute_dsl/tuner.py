@@ -190,7 +190,10 @@ def get_rubin_gemm2_valid_tactics(tile_size: int) -> List[Tuple]:
         (512, 256),
     ]
     mma_n_candidates = [128, 256]
-    cluster_shape_mn_candidates = [(1, 1), (2, 1), (1, 2), (2, 2)]
+    # Restrict to cluster_shape_n=1 only. The Rubin finalize kernel
+    # triggers illegal memory accesses with cluster_shape_n>1 at
+    # larger token counts (non-deterministic, routing-dependent).
+    cluster_shape_mn_candidates = [(1, 1), (2, 1)]
     raster_along_m_candidates = [False]
 
     valid_tactics = []
@@ -229,7 +232,11 @@ def get_rubin_moe_valid_tactics() -> List[Tuple]:
     Returns: List of (tile_size, gemm1_tactic, gemm2_tactic)
     """
     tactics = []
-    for tile_size in [128, 256]:
+    # Only tile_size=128 is enabled. tile_size=256 with B-reuse causes
+    # illegal memory accesses for certain GEMM2 tactic configurations and
+    # is disabled until the kernel bug is fixed (mirrors the Blackwell
+    # restriction in get_blackwell_moe_valid_tactics).
+    for tile_size in [128]:
         gemm1_tactics = get_rubin_gemm1_valid_tactics(tile_size)
         gemm2_tactics = get_rubin_gemm2_valid_tactics(tile_size)
         for gemm1_tactic, gemm2_tactic in itertools.product(
@@ -364,38 +371,6 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
     Tactic format is architecture-dependent — see _extract_tactic_params.
     """
 
-    dynamic_tensor_initializers = [
-        lambda shapes, dtype, device: torch.randint(
-            0, 256, shapes, dtype=torch.uint8, device=device
-        ),
-        lambda shapes, dtype, device: torch.randint(
-            1, 128, shapes, dtype=torch.uint8, device=device
-        ),
-        lambda shapes, dtype, device: torch.randint(
-            0,
-            8,
-            shapes,
-            dtype=torch.int32,
-            device=device,
-        ),
-        lambda shapes, dtype, device: torch.softmax(
-            torch.randn(shapes, device=device), dim=-1
-        ).to(torch.float32),
-        lambda shapes, dtype, device: torch.empty(shapes, dtype=dtype, device=device),
-    ]
-
-    tuning_config = TuningConfig(
-        dynamic_tensor_specs=(
-            DynamicTensorSpec(
-                input_idx=(0, 1, 2, 3, 11),
-                dim_idx=(0, 0, 0, 0, 0),
-                gen_tuning_buckets=get_last_power_of_2_num_tokens_buckets(8192),
-                map_to_tuning_buckets=lambda x: min(last_positive_power_of_2(x), 8192),
-                tensor_initializers=dynamic_tensor_initializers,
-            ),
-        ),
-    )
-
     def __init__(
         self,
         forward_impl: Callable,
@@ -415,6 +390,47 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
         self.use_fused_finalize = use_fused_finalize
         self.output_dtype = output_dtype
         self.enable_pdl = enable_pdl
+
+        # Instance-level so dummy expert IDs span all local experts
+        # (randint(0, num_experts)) for realistic profiling.
+        self.tuning_config = TuningConfig(
+            dynamic_tensor_specs=(
+                DynamicTensorSpec(
+                    input_idx=(0, 1, 2, 3, 11),
+                    dim_idx=(0, 0, 0, 0, 0),
+                    gen_tuning_buckets=get_last_power_of_2_num_tokens_buckets(8192),
+                    map_to_tuning_buckets=lambda x: min(
+                        last_positive_power_of_2(x), 8192
+                    ),
+                    tensor_initializers=[
+                        # 0: x — FP4 quantized input (uint8 packed)
+                        lambda shapes, dtype, device: torch.randint(
+                            0, 256, shapes, dtype=torch.uint8, device=device
+                        ),
+                        # 1: x_sf — FP8 scale factors (uint8)
+                        lambda shapes, dtype, device: torch.randint(
+                            1, 128, shapes, dtype=torch.uint8, device=device
+                        ),
+                        # 2: token_selected_experts — expert indices [0, num_experts)
+                        lambda shapes, dtype, device: torch.randint(
+                            0,
+                            max(num_experts, 1),
+                            shapes,
+                            dtype=torch.int32,
+                            device=device,
+                        ),
+                        # 3: token_final_scales — routing weights (softmax normalized)
+                        lambda shapes, dtype, device: torch.softmax(
+                            torch.randn(shapes, device=device), dim=-1
+                        ).to(torch.float32),
+                        # 11: moe_output — output buffer
+                        lambda shapes, dtype, device: torch.empty(
+                            shapes, dtype=dtype, device=device
+                        ),
+                    ],
+                ),
+            ),
+        )
 
     def __hash__(self):
         return hash(

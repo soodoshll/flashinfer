@@ -26,13 +26,17 @@ CUDA_VERSION=${1:-cu128}
 # This is to ensure that the torch version is compatible with the CUDA version.
 pip3 install --force-reinstall torch --index-url https://download.pytorch.org/whl/${CUDA_VERSION}
 pip3 install -r /install/requirements.txt
-pip3 install responses pytest scipy build cuda-python nvidia-nvshmem-cu12
+pip3 install responses pytest scipy build cuda-python nvshmem4py-cu12
 
 # Install cudnn package based on CUDA version
 if [[ "$CUDA_VERSION" == *"cu13"* ]]; then
   pip3 install --upgrade cuda-python==13.0
-  pip3 install "nvidia-cudnn-cu13>=9.14.0.64"
+  pip3 install --upgrade nvidia-cudnn-cu13
+  # Rubin (sm_107a) needs the internal cute-dsl wheel; the public nvidia-cutlass-dsl
+  # fails JIT with `-arch=compute_a is an unsupported option`.
+  pip3 install --upgrade nvidia-cutlass-dsl-internal \
+    --extra-index-url https://urm.nvidia.com/artifactory/api/pypi/nv-shared-pypi-local/simple
 else
   pip3 install --upgrade cuda-python==12.*
-  pip3 install "nvidia-cudnn-cu12>=9.14.0.64"
+  pip3 install --upgrade nvidia-cudnn-cu12
 fi
