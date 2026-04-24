@@ -86,9 +86,9 @@ void trtllm_paged_attention_launcher(
     const float* bmm1_scale_log2_ptr, const float* bmm2_scale_ptr, double o_sf_scale,
     int64_t o_sf_vec_size, int64_t o_sf_start_index, int64_t window_left, int64_t sum_seq_q,
     int64_t sparse_mla_top_k, float skip_softmax_threshold_scale_factor, bool skips_softmax,
-    bool use_fp16_softmax, bool uses_spcompress, bool uses_shared_paged_kv_idx, int64_t sm_count, bool enable_pdl, int64_t workspace_size,
-    int64_t k_sf_stride_heads, int64_t k_sf_stride_batch, int64_t v_sf_stride_heads,
-    int64_t v_sf_stride_batch, cudaStream_t stream) {
+    bool use_fp16_softmax, bool uses_spcompress, bool uses_shared_paged_kv_idx, int64_t sm_count,
+    bool enable_pdl, int64_t workspace_size, int64_t k_sf_stride_heads, int64_t k_sf_stride_batch,
+    int64_t v_sf_stride_heads, int64_t v_sf_stride_batch, cudaStream_t stream) {
   if (num_qo_heads % num_kv_heads != 0) {
     std::ostringstream err_msg;
     err_msg << "num_qo_heads must be a multiple of num_kv_heads, got num_kv_heads: " << num_kv_heads
@@ -371,8 +371,9 @@ void trtllm_paged_attention_decode(
       max_num_blocks_per_seq, bmm1_scale_value, bmm2_scale_value, bmm1_scale_log2_ptr,
       bmm2_scale_ptr, o_sf_scale, o_sf_vec_size, o_sf_start_index, window_left, sum_seq_q,
       sparse_mla_top_k, skip_softmax_threshold_scale_factor_value, skips_softmax,
-      use_fp16_softmax_value, uses_spcompress_value, uses_shared_paged_kv_idx_value, sm_count, enable_pdl, workspace_size, k_sf_stride_heads,
-      k_sf_stride_batch, v_sf_stride_heads, v_sf_stride_batch, stream);
+      use_fp16_softmax_value, uses_spcompress_value, uses_shared_paged_kv_idx_value, sm_count,
+      enable_pdl, workspace_size, k_sf_stride_heads, k_sf_stride_batch, v_sf_stride_heads,
+      v_sf_stride_batch, stream);
 }
 
 void trtllm_paged_attention_context(
@@ -497,8 +498,9 @@ void trtllm_paged_attention_context(
       kv_stride_heads, kv_stride_batch, max_num_blocks_per_seq, bmm1_scale_value, bmm2_scale_value,
       bmm1_scale_log2_ptr, bmm2_scale_ptr, o_sf_scale, o_sf_vec_size, o_sf_start_index, window_left,
       sum_seq_q, /*sparse_mla_top_k=*/0, skip_softmax_threshold_scale_factor_value, skips_softmax,
-      use_fp16_softmax_value, uses_spcompress_value, uses_shared_paged_kv_idx_value, sm_count, enable_pdl, workspace_size, k_sf_stride_heads,
-      k_sf_stride_batch, v_sf_stride_heads, v_sf_stride_batch, stream);
+      use_fp16_softmax_value, uses_spcompress_value, uses_shared_paged_kv_idx_value, sm_count,
+      enable_pdl, workspace_size, k_sf_stride_heads, k_sf_stride_batch, v_sf_stride_heads,
+      v_sf_stride_batch, stream);
 }
 
 void trtllm_ragged_attention_launcher(

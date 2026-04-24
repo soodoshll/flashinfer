@@ -188,11 +188,17 @@ def test_single_prefill_with_kv_cache(
 
     o_ref, lse_ref = attention_ref(1, q, k, v, causal, sm_scale)
     assert_close_with_mismatch_tolerance(
-        o, o_ref, rtol=1e-3, atol=1e-3,
+        o,
+        o_ref,
+        rtol=1e-3,
+        atol=1e-3,
         max_mismatched_elements=int(1e-5 * o.numel()),
     )
     assert_close_with_mismatch_tolerance(
-        lse, lse_ref.squeeze(0), rtol=1e-3, atol=1e-3,
+        lse,
+        lse_ref.squeeze(0),
+        rtol=1e-3,
+        atol=1e-3,
         max_mismatched_elements=int(1e-5 * lse.numel()),
     )
 
@@ -258,11 +264,17 @@ def test_batch_prefill_with_ragged_kv_cache(
 
     lse_ref = lse_ref.flatten(0, 1)
     assert_close_with_mismatch_tolerance(
-        o, o_ref, rtol=1e-3, atol=1e-3,
+        o,
+        o_ref,
+        rtol=1e-3,
+        atol=1e-3,
         max_mismatched_elements=int(1e-5 * o.numel()),
     )
     assert_close_with_mismatch_tolerance(
-        lse, lse_ref, rtol=1e-3, atol=1e-3,
+        lse,
+        lse_ref,
+        rtol=1e-3,
+        atol=1e-3,
         max_mismatched_elements=int(1e-5 * lse.numel()),
     )
 
@@ -424,7 +436,10 @@ def test_batch_mla_varlen_page_attention(
         lse_ref = lse_ref.flatten(0, 1)
         o_i = o[q_rows_arr[i]]
         assert_close_with_mismatch_tolerance(
-            o_i, o_ref, rtol=1e-3, atol=1e-3,
+            o_i,
+            o_ref,
+            rtol=1e-3,
+            atol=1e-3,
             max_mismatched_elements=int(1e-5 * o_i.numel()),
         )
         # if kv_lens[i] != 0:
@@ -509,12 +524,18 @@ def test_batch_mla_oob_kv_nan(
     o_ref, lse_ref = attention_ref(batch_size, q, k, v, causal, sm_scale)
     lse_ref = lse_ref.flatten(0, 1)
     assert_close_with_mismatch_tolerance(
-        o, o_ref, rtol=1e-3, atol=1e-3,
+        o,
+        o_ref,
+        rtol=1e-3,
+        atol=1e-3,
         max_mismatched_elements=int(1e-5 * o.numel()),
     )
     if kv_len != 0:
         assert_close_with_mismatch_tolerance(
-            lse, lse_ref, rtol=1e-3, atol=1e-3,
+            lse,
+            lse_ref,
+            rtol=1e-3,
+            atol=1e-3,
             max_mismatched_elements=int(1e-5 * lse.numel()),
         )
 
@@ -652,12 +673,18 @@ def test_batch_mla_page_attention(
     o_ref, lse_ref = attention_ref(batch_size, q, k, v, causal, sm_scale)
     lse_ref = lse_ref.flatten(0, 1)
     assert_close_with_mismatch_tolerance(
-        o, o_ref, rtol=1e-3, atol=1e-3,
+        o,
+        o_ref,
+        rtol=1e-3,
+        atol=1e-3,
         max_mismatched_elements=int(1e-5 * o.numel()),
     )
     if kv_len != 0:
         assert_close_with_mismatch_tolerance(
-            lse, lse_ref, rtol=1e-3, atol=1e-3,
+            lse,
+            lse_ref,
+            rtol=1e-3,
+            atol=1e-3,
             max_mismatched_elements=int(1e-5 * lse.numel()),
         )
 

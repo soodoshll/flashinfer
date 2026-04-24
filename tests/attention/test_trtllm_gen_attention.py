@@ -612,7 +612,9 @@ def _test_trtllm_batch_prefill(
         )
 
     # Fp16Softmax cubins are only shipped for BF16 Q/KV/O.
-    if use_fp16_softmax and not (q_dtype == "bf16" and kv_dtype == "bf16" and o_dtype == "bf16"):
+    if use_fp16_softmax and not (
+        q_dtype == "bf16" and kv_dtype == "bf16" and o_dtype == "bf16"
+    ):
         pytest.skip("use_fp16_softmax requires BF16 Q/KV/O")
 
     # Spcomp cubins are only shipped for FP8 Q.
@@ -800,9 +802,7 @@ def _test_trtllm_batch_prefill(
         # block-scale-factor / RMSE tolerances (empirically: SF abs-diff up to ~12 on
         # this path) so the approximation is accepted.
         nvfp4_tols = (
-            dict(sf_rtol=2.0, sf_atol=30.0, rmse_tol=1.0)
-            if uses_spcompress
-            else dict()
+            dict(sf_rtol=2.0, sf_atol=30.0, rmse_tol=1.0) if uses_spcompress else dict()
         )
         output, output_ref = unpack_compare_nvfp4(
             output, output_ref, o_sf_scale, o_sf_vec_size, **nvfp4_tols
@@ -1099,7 +1099,9 @@ def _test_trtllm_batch_decode(
     # and only shipped for specific dtype combinations.
     if (use_fp16_softmax or uses_spcompress) and backend != "trtllm-gen":
         pytest.skip("use_fp16_softmax / uses_spcompress require trtllm-gen backend")
-    if use_fp16_softmax and not (q_dtype == "bf16" and kv_dtype == "bf16" and o_dtype == "bf16"):
+    if use_fp16_softmax and not (
+        q_dtype == "bf16" and kv_dtype == "bf16" and o_dtype == "bf16"
+    ):
         pytest.skip("use_fp16_softmax requires BF16 Q/KV/O")
     if uses_spcompress and q_dtype != "fp8":
         pytest.skip("uses_spcompress requires FP8 Q")
@@ -1327,9 +1329,7 @@ def _test_trtllm_batch_decode(
     if o_dtype == "nvfp4":
         # Spcomp diverges from dense attention; loosen NVFP4 SF / RMSE tolerances.
         nvfp4_tols = (
-            dict(sf_rtol=2.0, sf_atol=30.0, rmse_tol=1.0)
-            if uses_spcompress
-            else dict()
+            dict(sf_rtol=2.0, sf_atol=30.0, rmse_tol=1.0) if uses_spcompress else dict()
         )
         output, output_ref = unpack_compare_nvfp4(
             output, output_ref, o_sf_scale, o_sf_vec_size, **nvfp4_tols
@@ -1375,7 +1375,7 @@ def _test_trtllm_batch_decode(
         allowed_mismatch_rate = 0.10
     else:
         allowed_mismatch_rate = 5e-5
-    
+
     # Calculate max allowed mismatched elements based on tensor size
     total_elements = (output.float() * o_scale).numel()
     max_mismatched_elements = int(allowed_mismatch_rate * total_elements)

@@ -16,7 +16,7 @@ limitations under the License.
 
 import functools
 from types import SimpleNamespace
-from typing import List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 
@@ -154,7 +154,7 @@ def gen_fp4_quantization_module(nvcc_flags: List[str], device_arch: str) -> JitS
 
 @functools.cache
 def get_fp4_quantization_module(backend: str = "100"):
-    backend_modules = {
+    backend_modules: Dict[str, Callable[..., JitSpec]] = {
         "121": gen_fp4_quantization_sm121_module,
         "120f": gen_fp4_quantization_sm120f_module,
         "120": gen_fp4_quantization_sm120_module,
