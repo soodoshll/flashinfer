@@ -18,7 +18,6 @@ import einops
 import pytest
 import torch
 from tests.test_helpers.sink_attention_reference import sink_attention_unified
-from tests.test_helpers.test_helpers import assert_close_with_mismatch_tolerance
 
 import flashinfer
 from flashinfer.utils import get_compute_capability
@@ -122,14 +121,7 @@ def test_blackwell_trtllm_gen_decode_attention_sink(
     else:
         raise ValueError(f"Unsupported dtype: {dtype}")
 
-    max_mismatched_elements = int(1e-6 * output.numel())
-    assert_close_with_mismatch_tolerance(
-        output,
-        o_ref,
-        atol=atol,
-        rtol=rtol,
-        max_mismatched_elements=max_mismatched_elements,
-    )
+    torch.testing.assert_close(o_ref, output, atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -241,11 +233,4 @@ def test_blackwell_trtllm_gen_context_attention_sink(
     else:
         raise ValueError(f"Unsupported dtype: {dtype}")
 
-    max_mismatched_elements = int(1e-6 * output.numel())
-    assert_close_with_mismatch_tolerance(
-        output,
-        o_ref,
-        atol=atol,
-        rtol=rtol,
-        max_mismatched_elements=max_mismatched_elements,
-    )
+    torch.testing.assert_close(o_ref, output, atol=atol, rtol=rtol)

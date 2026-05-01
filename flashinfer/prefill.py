@@ -3694,6 +3694,8 @@ def trtllm_ragged_attention_deepseek(
     skip_softmax_threshold_scale_factor: Optional[float] = None,
     out: Optional[torch.Tensor] = None,
     lse: Optional[torch.Tensor] = None,
+    use_fp16_softmax: Optional[bool] = None,
+    uses_spcompress: Optional[bool] = None,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """
     Parameters
@@ -3744,6 +3746,14 @@ def trtllm_ragged_attention_deepseek(
         output tensor, if not provided, will be allocated with shape [query.shape[0], query.shape[1], value.shape[2]]
     lse : Optional[torch.Tensor]
         lse tensor, if not provided, will be allocated with shape [query.shape[0], query.shape[1]]
+    use_fp16_softmax : Optional[bool]
+        Select the trtllm-gen ``Fp16Softmax`` cubin variant (BF16 Q/KV/O only).
+        When ``None`` (default) or ``False`` the standard FP32-accumulator softmax cubin is used.
+        Setting ``True`` for non-BF16 inputs will fail kernel selection.
+    uses_spcompress : Optional[bool]
+        Select the trtllm-gen ``Spcomp`` cubin variant (FP8 Q, with FP8 or BF16 output).
+        When ``None`` (default) or ``False`` the standard cubin is used.
+        Setting ``True`` for non-FP8 Q will fail kernel selection.
 
     Returns
     -------
@@ -3831,6 +3841,8 @@ def trtllm_ragged_attention_deepseek(
         attention_sinks,
         skip_softmax_threshold_scale_factor,
         lse,
+        use_fp16_softmax,
+        uses_spcompress,
     )
     if return_lse:
         assert lse is not None, (

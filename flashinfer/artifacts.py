@@ -155,7 +155,7 @@ class CheckSumHash:
     """
 
     TRTLLM_GEN_FMHA: str = (
-        "7389e9cc467a90b4bc0cfb1b4ce1480113e1ce9983db7ad20952acb7501736d3"
+        "112d80ab4318d23648241d4169fd5a858461bc44be23ca48b8aff892d1f6f6d3"
     )
     TRTLLM_GEN_BMM: str = (
         "db06db7f36a2a9395a2041ff6ac016fe664874074413a2ed90797f91ef17e0f6"
