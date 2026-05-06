@@ -166,8 +166,7 @@ void trtllm_paged_attention_launcher(
   if (mode == TllmPagedAttentionMode::Context) {
     runner_params.mMaskType = TrtllmGenAttentionMaskType::Causal;
     runner_params.mKernelType = FmhaKernelType::Context;
-    // runner_params.mTileScheduler = TileScheduler::Persistent;
-    runner_params.mTileScheduler = TileScheduler::Static;
+    runner_params.mTileScheduler = TileScheduler::Persistent;
     runner_params.mMultiCtasKvMode = false;
 
     runner_params.cumSeqLensQPtr = cum_seq_lens_q;
@@ -588,10 +587,6 @@ void trtllm_ragged_attention_launcher(
   runner_params.mSkipsSoftmaxWhenPossible = skips_softmax;
   runner_params.mSkipSoftmaxThresholdScaleFactor = skip_softmax_threshold_scale_factor;
 
-  // Cubin-variant selectors (FP16 softmax accumulator, sparse compression).
-  // Ragged is context-only (mKernelType set to Context above), so the support
-  // matrix matches `_context`: BF16 Q/KV/O for Fp16Softmax, FP8 Q (and FP8 Q ->
-  // BF16 O) for Spcomp.
   runner_params.mUseFp16Softmax = use_fp16_softmax;
   runner_params.mUsesSpcompress = uses_spcompress;
 

@@ -326,6 +326,271 @@ def flatten_paged_kv(
     return k_flat, v_flat, kv_indptr_tokens
 
 
+_SPCOMPRESS_TILE_GEOMETRY = {
+    # (head_dim, q_dtype, kv_dtype) -> (tile_size_kv, num_tokens_per_cta)
+    (128, "fp8", "fp8"): (128, 128),
+    (256, "fp8", "fp8"): (128, 128),
+}
+
+
+def _apply_2_of_4_keep_largest(logits: torch.Tensor) -> torch.Tensor:
+    """In every contiguous group of 4 along the last (K) dim, keep the 2
+    largest entries and replace the 2 smallest with -inf. Tail < 4 left dense.
+    Operates in-place on a clone; returns the modified tensor.
+    """
+    n = logits.shape[-1]
+    num_groups = n // 4
+    if num_groups == 0:
+        return logits
+    head = logits[..., : num_groups * 4]
+    tail = logits[..., num_groups * 4 :]
+    # Reshape head to groups of 4 and keep top-2.
+    grouped = head.reshape(*head.shape[:-1], num_groups, 4)
+    # topk on float32 is stable enough; ties tie-break naturally — at fp32 the
+    # difference vs the kernel's sorting-network tie-break is below FP8/BF16
+    # output tolerance.
+    _, top_idx = torch.topk(grouped, k=2, dim=-1)
+    keep_mask = torch.zeros_like(grouped, dtype=torch.bool)
+    keep_mask.scatter_(-1, top_idx, True)
+    sparsified = torch.where(
+        keep_mask, grouped, torch.full_like(grouped, float("-inf"))
+    )
+    sparsified = sparsified.reshape(*head.shape)
+    return torch.cat([sparsified, tail], dim=-1)
+
+
+def _spcompress_reference(
+    ref_q: torch.Tensor,
+    k_flat: torch.Tensor,
+    v_flat: torch.Tensor,
+    qo_indptr: torch.Tensor,
+    kv_indptr: torch.Tensor,
+    sm_scale: float,
+    *,
+    causal: bool,
+    window_left: int,
+    chunked_attention_size: int,
+    sink: torch.Tensor | None,
+    tile_size_kv: int,
+    num_tokens_per_cta: int,
+) -> torch.Tensor:
+    """For each (batch, ctaQ-chunk, kv-tile):
+      - compute QK^T scaled
+      - apply causal / sliding-window / chunked mask
+      - if interior tile (per the boundary formula), apply 2:4 keep-largest in
+        groups of 4 along K (tail < 4 dense)
+      - online softmax, weighted V accumulate
+    Returns fp32 [sumSeqQ, num_qo_heads, head_dim].
+    """
+    qo_indptr_cpu = qo_indptr.cpu()
+    kv_indptr_cpu = kv_indptr.cpu()
+    batch_size = qo_indptr_cpu.numel() - 1
+    num_qo_heads = ref_q.shape[1]
+    num_kv_heads = k_flat.shape[1]
+    head_dim = ref_q.shape[-1]
+    head_grp = num_qo_heads // num_kv_heads
+
+    out = torch.zeros(
+        ref_q.shape[0], num_qo_heads, head_dim, device=ref_q.device, dtype=torch.float32
+    )
+
+    for i in range(batch_size):
+        q0 = int(qo_indptr_cpu[i].item())
+        q1 = int(qo_indptr_cpu[i + 1].item())
+        kv0 = int(kv_indptr_cpu[i].item())
+        kv1 = int(kv_indptr_cpu[i + 1].item())
+        seq_len_q = q1 - q0
+        seq_len_kv = kv1 - kv0
+        if seq_len_q == 0 or seq_len_kv == 0:
+            continue
+
+        # Causal Q-row -> K offset: each Q row i sees K rows [0, seqOffsetQ + i].
+        seq_offset_q = seq_len_kv - seq_len_q if causal else 0
+
+        q_b = ref_q[q0:q1].float()  # [Lq, Hq, D]
+        k_b = k_flat[kv0:kv1].float()  # [Lk, Hkv, D]
+        v_b = v_flat[kv0:kv1].float()  # [Lk, Hkv, D]
+        # Replicate K/V across head groups (GQA).
+        if head_grp > 1:
+            k_b = (
+                k_b.unsqueeze(2)
+                .expand(seq_len_kv, num_kv_heads, head_grp, head_dim)
+                .reshape(seq_len_kv, num_qo_heads, head_dim)
+            )
+            v_b = (
+                v_b.unsqueeze(2)
+                .expand(seq_len_kv, num_kv_heads, head_grp, head_dim)
+                .reshape(seq_len_kv, num_qo_heads, head_dim)
+            )
+
+        # [Hq, Lq, D] / [Hq, Lk, D]
+        q_t = q_b.transpose(0, 1)
+        k_t = k_b.transpose(0, 1)
+        v_t = v_b.transpose(0, 1)
+
+        # Iterate CTA chunks of Q rows (numTokensPerCta).
+        for cta_start_q in range(0, seq_len_q, num_tokens_per_cta):
+            cta_q_end = min(cta_start_q + num_tokens_per_cta, seq_len_q)
+            cta_rows = cta_q_end - cta_start_q
+
+            if causal:
+                # See FmhaReference.cu:218-363. The boundary formulas use the
+                # nominal CTA size (num_tokens_per_cta) even when the tail CTA
+                # is partially filled — this matches the kernel exactly.
+                ki_cta_first_end = seq_offset_q + cta_start_q + 1
+                ki_cta_last_end = seq_offset_q + cta_start_q + num_tokens_per_cta
+            else:
+                ki_cta_first_end = seq_len_kv
+                ki_cta_last_end = seq_len_kv
+            if window_left >= 0:
+                ki_cta_last_start = max(0, ki_cta_last_end - (window_left + 1))
+            elif chunked_attention_size > 0:
+                chunk_base = (
+                    (seq_offset_q + cta_start_q) // chunked_attention_size
+                ) * chunked_attention_size
+                ki_cta_last_start = chunk_base
+            else:
+                ki_cta_last_start = 0
+
+            # [Hq, cta_rows, D]
+            q_cta = q_t[:, cta_start_q:cta_q_end, :]
+
+            # Per-head running softmax state.
+            running_max = torch.full(
+                (num_qo_heads, cta_rows),
+                float("-inf"),
+                device=ref_q.device,
+                dtype=torch.float32,
+            )
+            running_sum = torch.zeros(
+                (num_qo_heads, cta_rows), device=ref_q.device, dtype=torch.float32
+            )
+            running_o = torch.zeros(
+                (num_qo_heads, cta_rows, head_dim),
+                device=ref_q.device,
+                dtype=torch.float32,
+            )
+
+            num_tiles = (seq_len_kv + tile_size_kv - 1) // tile_size_kv
+            for t in range(num_tiles):
+                tile_start = t * tile_size_kv
+                tile_end = min(tile_start + tile_size_kv, seq_len_kv)
+
+                # QK^T scaled. [Hq, cta_rows, tile_len]
+                logits = (
+                    torch.matmul(
+                        q_cta, k_t[:, tile_start:tile_end, :].transpose(-1, -2)
+                    )
+                    * sm_scale
+                )
+
+                # Apply causal / window / chunked mask within this tile.
+                # Per Q row r (cta-local index), the actual Q-row global K
+                # cutoff is `seq_offset_q + cta_start_q + r`.
+                if causal or window_left >= 0 or chunked_attention_size > 0:
+                    row_q_pos = (
+                        torch.arange(cta_rows, device=ref_q.device)
+                        + seq_offset_q
+                        + cta_start_q
+                    )  # [cta_rows]
+                    k_pos = torch.arange(
+                        tile_start, tile_end, device=ref_q.device
+                    )  # [tile_len]
+                    if causal:
+                        causal_mask = k_pos.unsqueeze(0) <= row_q_pos.unsqueeze(
+                            1
+                        )  # [cta_rows, tile_len]
+                    else:
+                        causal_mask = torch.ones(
+                            (cta_rows, tile_end - tile_start),
+                            dtype=torch.bool,
+                            device=ref_q.device,
+                        )
+                    if window_left >= 0:
+                        causal_mask = causal_mask & (
+                            row_q_pos.unsqueeze(1) - k_pos.unsqueeze(0) <= window_left
+                        )
+                    if chunked_attention_size > 0:
+                        q_chunk = (row_q_pos // chunked_attention_size).unsqueeze(1)
+                        k_chunk = (k_pos // chunked_attention_size).unsqueeze(0)
+                        causal_mask = causal_mask & (q_chunk == k_chunk)
+                    mask_for_logits = causal_mask.unsqueeze(
+                        0
+                    )  # [1, cta_rows, tile_len]
+                    logits = logits.masked_fill(~mask_for_logits, float("-inf"))
+
+                # Boundary detection: a tile is boundary if any Q row's mask
+                # cuts through this tile (per FmhaReference.cu:218-363).
+                is_boundary = (tile_start < ki_cta_last_start) or (
+                    tile_end > ki_cta_first_end
+                )
+                if not is_boundary:
+                    logits = _apply_2_of_4_keep_largest(logits)
+
+                # Online softmax update.
+                if sink is not None:
+                    pass
+
+                tile_max = logits.amax(dim=-1)  # [Hq, cta_rows]
+                # Avoid -inf propagation when an entire row in this tile is masked.
+                tile_max = torch.where(
+                    torch.isinf(tile_max) & (tile_max < 0),
+                    torch.full_like(tile_max, float("-inf")),
+                    tile_max,
+                )
+                new_max = torch.maximum(running_max, tile_max)
+                # Rescale running sum/output by exp(running_max - new_max).
+                # When new_max == -inf (no contributions yet), the rescale factor is 1.
+                alpha = torch.exp(
+                    torch.where(
+                        torch.isfinite(new_max),
+                        running_max - new_max,
+                        torch.zeros_like(new_max),
+                    )
+                )
+                # alpha is undefined where running_max==-inf and new_max==-inf;
+                # those entries are still zeroed by running_sum=0 / running_o=0.
+                exp_logits = torch.exp(
+                    logits - new_max.unsqueeze(-1)
+                )  # [Hq, cta_rows, tile_len]
+                # Replace any NaN (from -inf - -inf) with 0.
+                exp_logits = torch.nan_to_num(exp_logits, nan=0.0, posinf=0.0)
+                tile_sum = exp_logits.sum(dim=-1)  # [Hq, cta_rows]
+
+                # [Hq, cta_rows, D]
+                v_tile = v_t[:, tile_start:tile_end, :]
+                tile_o = torch.matmul(exp_logits, v_tile)
+
+                running_sum = running_sum * alpha + tile_sum
+                running_o = running_o * alpha.unsqueeze(-1) + tile_o
+                running_max = new_max
+
+            if sink is not None:
+                # Sink contributes a virtual K column with logit value `sink[h]`
+                # per head. Fold it into the denominator (and rescale) at the
+                # very end — equivalent to treating it as a once-only tile.
+                sink_logit = sink.float().unsqueeze(-1).expand(num_qo_heads, cta_rows)
+                new_max = torch.maximum(running_max, sink_logit)
+                alpha = torch.exp(
+                    torch.where(
+                        torch.isfinite(new_max),
+                        running_max - new_max,
+                        torch.zeros_like(new_max),
+                    )
+                )
+                running_o = running_o * alpha.unsqueeze(-1)
+                running_sum = running_sum * alpha + torch.exp(sink_logit - new_max)
+                running_max = new_max
+
+            # Finalize: divide by the running denominator. Rows with no
+            # contribution (running_sum == 0) stay zeros.
+            denom = running_sum.clamp(min=1e-30).unsqueeze(-1)
+            cta_out = running_o / denom  # [Hq, cta_rows, D]
+            out[q0 + cta_start_q : q0 + cta_q_end] = cta_out.transpose(0, 1)
+
+    return out
+
+
 def create_workspace_buffers(device: torch.device):
     # Lazily initialize and reuse global workspace buffers
     global global_workspace_buffer, global_trtllm_gen_fmha_workspace_buffer
@@ -599,6 +864,8 @@ def _test_trtllm_batch_prefill(
     non_contiguous_query: bool = False,
     skips_softmax: bool = False,
     uses_shared_paged_kv_idx: bool = True,
+    use_fp16_softmax: bool = False,
+    uses_spcompress: bool = False,
 ):
     compute_capability = get_compute_capability(torch.device(device="cuda"))
     if compute_capability[0] != 10:
@@ -615,6 +882,19 @@ def _test_trtllm_batch_prefill(
             pytest.skip("NVFP4 KV cache requires FP8 query")
         if o_dtype != "fp8":
             pytest.skip("NVFP4 KV cache only supports FP8 output")
+        if compute_capability[0] == 10 and compute_capability[1] == 7:
+            pytest.skip("KV Cache NVFP4 is not supported on SM107")
+
+    if uses_spcompress:
+        if q_dtype != "fp8":
+            pytest.skip("uses_spcompress requires FP8 Q")
+        if kv_dtype == "nvfp4":
+            pytest.skip("uses_spcompress is not shipped for NVFP4 KV")
+        if (head_dim, q_dtype, kv_dtype) not in _SPCOMPRESS_TILE_GEOMETRY:
+            pytest.skip(
+                f"no spcompress tile geometry for "
+                f"(head_dim={head_dim}, q_dtype={q_dtype}, kv_dtype={kv_dtype})"
+            )
 
     # Set up test parameters
     torch.manual_seed(0)
@@ -684,7 +964,34 @@ def _test_trtllm_batch_prefill(
         "window_left": window_left,
     }
     sink = torch.rand(num_qo_heads, device=GPU_DEVICE, dtype=torch.float32) * 5
-    if head_dim > 256:
+    if uses_spcompress:
+        # Boundary tiles attend densely; interior tiles get 2:4 keep-largest along K.
+        k_flat, v_flat, kv_indptr_tokens = flatten_paged_kv(
+            ref_kv_cache,
+            page_table,
+            seq_lens.to(GPU_DEVICE),
+            page_size,
+            kv_last_page_len,
+            kv_layout,
+        )
+        tile_size_kv, num_tokens_per_cta = _SPCOMPRESS_TILE_GEOMETRY[
+            (head_dim, q_dtype, kv_dtype)
+        ]
+        output_ref = _spcompress_reference(
+            ref_q,
+            k_flat,
+            v_flat,
+            q_indptr,
+            kv_indptr_tokens,
+            sm_scale,
+            causal=True,
+            window_left=window_left,
+            chunked_attention_size=0,
+            sink=(sink if enable_sink else None),
+            tile_size_kv=tile_size_kv,
+            num_tokens_per_cta=num_tokens_per_cta,
+        )
+    elif head_dim > 256:
         # FlashInfer's own FA2/FA3 kernels don't support head_dim > 256;
         # fall back to a PyTorch SDPA reference (causal/windowed only, no sink support).
         assert not enable_sink, (
@@ -778,6 +1085,8 @@ def _test_trtllm_batch_prefill(
         kv_cache_sf=kv_cache_sf_kernel,
         skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
         uses_shared_paged_kv_idx=uses_shared_paged_kv_idx,
+        use_fp16_softmax=use_fp16_softmax,
+        uses_spcompress=uses_spcompress,
     )
     # check if the first 8192 * 256 * 4 bytes of workspace_buffer is zero
     # note(Yingyi): the first 8192 * 256 * 4 bytes of workspace_buffer is the counter workspace, size might change in the future
@@ -831,8 +1140,12 @@ def _test_trtllm_batch_prefill(
         )
 
     if (
-        o_dtype != "nvfp4" and kv_dtype != "nvfp4" and uses_shared_paged_kv_idx
-    ):  # wrapper api does not support fp4 output/kv or separate KV page indices yet.
+        o_dtype != "nvfp4"
+        and kv_dtype != "nvfp4"
+        and uses_shared_paged_kv_idx
+        and not use_fp16_softmax
+        and not uses_spcompress
+    ):  # wrapper api does not support fp4 output/kv, separate KV page indices, or the cubin-variant flags.
         # test wrapper with trtllm-gen backend
         wrapper_trtllm_gen = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(
             workspace_buffer, kv_layout, backend="trtllm-gen"
@@ -1000,6 +1313,69 @@ def test_trtllm_batch_prefill_bs1(
     )
 
 
+@pytest.mark.parametrize("kv_layout", ["HND"])
+@pytest.mark.parametrize(
+    "batch_size,page_size,num_kv_heads,head_grp_size",
+    [
+        (4, 16, 2, 1),
+    ],
+)
+@pytest.mark.parametrize(
+    "q_dtype,kv_dtype,o_dtype",
+    [
+        ("fp8", "fp8", "bf16"),
+        ("fp8", "fp8", "fp16"),
+        ("fp8", "fp8", "fp8"),
+    ],
+)
+@pytest.mark.parametrize(
+    "head_dim,window_left",
+    [
+        (128, -1),
+        (256, -1),
+        (128, 127),
+    ],
+)
+@pytest.mark.parametrize("enable_pdl", [None])
+@pytest.mark.parametrize("enable_sink", [False, True])
+@pytest.mark.parametrize("max_q_len", [511])
+@pytest.mark.parametrize("max_kv_len", [2047])
+def test_trtllm_batch_prefill_cubin_variants(
+    kv_layout: str,
+    batch_size: int,
+    page_size: int,
+    num_kv_heads: int,
+    head_grp_size: int,
+    window_left: int,
+    q_dtype: str,
+    o_dtype: str,
+    kv_dtype: str,
+    enable_pdl: bool,
+    enable_sink: bool,
+    max_q_len: int,
+    max_kv_len: int,
+    head_dim: int,
+):
+    _test_trtllm_batch_prefill(
+        kv_layout,
+        batch_size,
+        page_size,
+        num_kv_heads,
+        head_grp_size,
+        window_left,
+        q_dtype,
+        o_dtype,
+        kv_dtype,
+        enable_pdl,
+        enable_sink,
+        max_q_len,
+        max_kv_len,
+        False,
+        head_dim,
+        uses_spcompress=True,
+    )
+
+
 def _test_trtllm_batch_decode(
     backend: str,
     kv_layout: str,
@@ -1065,6 +1441,12 @@ def _test_trtllm_batch_decode(
             pytest.skip("NVFP4 KV cache requires FP8 query")
         if o_dtype != "fp8":
             pytest.skip("NVFP4 KV cache only supports FP8 output")
+        if (
+            backend == "trtllm-gen"
+            and compute_capability[0] == 10
+            and compute_capability[1] == 7
+        ):
+            pytest.skip("NVFP4 KV cache is not supported on SM107")
         pass
 
     # Set up test parameters
@@ -1845,6 +2227,7 @@ def test_trtllm_gen_prefill(
     head_grp_size: int,
     causal: bool,
     skips_softmax: bool,
+    use_fp16_softmax: bool = False,
 ) -> None:
     compute_capability = get_compute_capability(torch.device(device="cuda"))
     if compute_capability[0] != 10:
@@ -1957,18 +2340,24 @@ def test_trtllm_gen_prefill(
         True,
         skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
         out=output,
+        use_fp16_softmax=use_fp16_softmax,
     )
+    out_atol, out_rtol = 1e-2, 1e-2
+    lse_atol, lse_rtol = 1e-3, 1e-3
+    if use_fp16_softmax:
+        out_atol, out_rtol = 3e-2, 3e-2
+        lse_atol, lse_rtol = 1e-2, 1e-2
     torch.testing.assert_close(
         output_trtllm,
         output_ref,
-        atol=1e-2,
-        rtol=1e-2,
+        atol=out_atol,
+        rtol=out_rtol,
     )
     torch.testing.assert_close(
         lse_trtllm,
         lse_ref,
-        atol=1e-3,
-        rtol=1e-3,
+        atol=lse_atol,
+        rtol=lse_rtol,
     )
     # check if the first 8192 * 256 * 4 bytes of workspace_buffer is zero
     # note(Yingyi): the first 8192 * 256 * 4 bytes of workspace_buffer is the counter workspace, size might change in the future
@@ -2004,6 +2393,27 @@ def test_trtllm_gen_prefill_bs1(
         head_grp_size,
         causal,
         skips_softmax,
+    )
+
+
+@pytest.mark.parametrize(
+    "mla_dimensions", [deepseek_mla_dimensions, smaller_mla_dimensions]
+)
+@pytest.mark.parametrize("causal", [True, False])
+def test_trtllm_gen_prefill_use_fp16_softmax(
+    mla_dimensions: MLAHeadDimensions,
+    causal: bool,
+) -> None:
+    test_trtllm_gen_prefill(
+        mla_dimensions=mla_dimensions,
+        batch_size=4,
+        s_qo=64,
+        s_kv=64,
+        num_kv_heads=16,
+        head_grp_size=1,
+        causal=causal,
+        skips_softmax=False,
+        use_fp16_softmax=True,
     )
 
 
