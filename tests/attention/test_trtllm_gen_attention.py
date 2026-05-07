@@ -333,29 +333,6 @@ _SPCOMPRESS_TILE_GEOMETRY = {
 }
 
 
-def _apply_2_of_4_keep_largest(logits: torch.Tensor) -> torch.Tensor:
-    """In every contiguous group of 4 along the last (K) dim, keep the 2
-    largest entries and replace the 2 smallest with -inf. Tail < 4 left dense.
-    Operates in-place on a clone; returns the modified tensor.
-    """
-    n = logits.shape[-1]
-    num_groups = n // 4
-    if num_groups == 0:
-        return logits
-    head = logits[..., : num_groups * 4]
-    tail = logits[..., num_groups * 4 :]
-    # Reshape head to groups of 4 and keep top-2.
-    grouped = head.reshape(*head.shape[:-1], num_groups, 4)
-    _, top_idx = torch.topk(grouped, k=2, dim=-1)
-    keep_mask = torch.zeros_like(grouped, dtype=torch.bool)
-    keep_mask.scatter_(-1, top_idx, True)
-    sparsified = torch.where(
-        keep_mask, grouped, torch.full_like(grouped, float("-inf"))
-    )
-    sparsified = sparsified.reshape(*head.shape)
-    return torch.cat([sparsified, tail], dim=-1)
-
-
 def _spcompress_reference(
     ref_q: torch.Tensor,
     k_flat: torch.Tensor,
@@ -371,12 +348,15 @@ def _spcompress_reference(
     tile_size_kv: int,
     num_tokens_per_cta: int,
 ) -> torch.Tensor:
-    """For each (batch, ctaQ-chunk, kv-tile):
-      - compute QK^T scaled
-      - apply causal / sliding-window / chunked mask
-      - if interior tile (per the boundary formula), apply 2:4 keep-largest in
-        groups of 4 along K (tail < 4 dense)
-      - online softmax, weighted V accumulate
+    """Vectorized port of FmhaReference.cu:218-363's spcompress path.
+
+    Departs from the kernel's per-tile online-softmax structure: builds the
+    full [Lq, Lk] sparsity mask in one pass, then runs a single dense softmax.
+    Online-softmax is a numerical-stability rewrite, not part of the math
+    being verified — folding it out trades a per-tile Python loop for a
+    handful of large tensor ops, which is what makes long-sequence
+    parametrizations practical.
+
     Returns fp32 [sumSeqQ, num_qo_heads, head_dim].
     """
     qo_indptr_cpu = qo_indptr.cpu()
@@ -386,10 +366,16 @@ def _spcompress_reference(
     num_kv_heads = k_flat.shape[1]
     head_dim = ref_q.shape[-1]
     head_grp = num_qo_heads // num_kv_heads
+    device = ref_q.device
 
     out = torch.zeros(
-        ref_q.shape[0], num_qo_heads, head_dim, device=ref_q.device, dtype=torch.float32
+        ref_q.shape[0], num_qo_heads, head_dim, device=device, dtype=torch.float32
     )
+
+    # tile_size_kv % 4 must be 0 for the group-to-tile mapping below to hold:
+    # otherwise a group-of-4 along K could straddle a tile boundary and the
+    # interior/boundary lookup wouldn't be well-defined.
+    assert tile_size_kv % 4 == 0, "tile_size_kv must be a multiple of 4"
 
     for i in range(batch_size):
         q0 = int(qo_indptr_cpu[i].item())
@@ -407,179 +393,136 @@ def _spcompress_reference(
         q_b = ref_q[q0:q1].float()  # [Lq, Hq, D]
         k_b = k_flat[kv0:kv1].float()  # [Lk, Hkv, D]
         v_b = v_flat[kv0:kv1].float()  # [Lk, Hkv, D]
-        # Replicate K/V across head groups (GQA).
         if head_grp > 1:
-            k_b = (
-                k_b.unsqueeze(2)
-                .expand(seq_len_kv, num_kv_heads, head_grp, head_dim)
-                .reshape(seq_len_kv, num_qo_heads, head_dim)
+            k_b = k_b.repeat_interleave(head_grp, dim=1)
+            v_b = v_b.repeat_interleave(head_grp, dim=1)
+
+        q_t = q_b.transpose(0, 1)  # [Hq, Lq, D]
+        k_t = k_b.transpose(0, 1)  # [Hq, Lk, D]
+        v_t = v_b.transpose(0, 1)  # [Hq, Lk, D]
+
+        # Full QK^T scaled. [Hq, Lq, Lk]
+        logits = torch.matmul(q_t, k_t.transpose(-1, -2)) * sm_scale
+
+        # Causal / sliding-window / chunked mask.
+        row_q_pos = torch.arange(seq_len_q, device=device) + seq_offset_q  # [Lq]
+        k_pos = torch.arange(seq_len_kv, device=device)  # [Lk]
+        if causal:
+            attn_mask = k_pos.unsqueeze(0) <= row_q_pos.unsqueeze(1)  # [Lq, Lk]
+        else:
+            attn_mask = torch.ones(
+                (seq_len_q, seq_len_kv), dtype=torch.bool, device=device
             )
-            v_b = (
-                v_b.unsqueeze(2)
-                .expand(seq_len_kv, num_kv_heads, head_grp, head_dim)
-                .reshape(seq_len_kv, num_qo_heads, head_dim)
+        if window_left >= 0:
+            attn_mask = attn_mask & (
+                row_q_pos.unsqueeze(1) - k_pos.unsqueeze(0) <= window_left
             )
+        if chunked_attention_size > 0:
+            q_chunk = (row_q_pos // chunked_attention_size).unsqueeze(1)
+            k_chunk = (k_pos // chunked_attention_size).unsqueeze(0)
+            attn_mask = attn_mask & (q_chunk == k_chunk)
+        # Apply causal mask before computing top-2 so masked positions can't
+        # be preferred over finite ones (they're already -inf).
+        logits = torch.where(attn_mask.unsqueeze(0), logits, float("-inf"))
 
-        # [Hq, Lq, D] / [Hq, Lk, D]
-        q_t = q_b.transpose(0, 1)
-        k_t = k_b.transpose(0, 1)
-        v_t = v_b.transpose(0, 1)
+        # Per-(cta-chunk, kv-tile) interior status, vectorized over both
+        # axes. Formula matches FmhaReference.cu — interior iff the tile
+        # lies strictly inside the chunk's [last_start, first_end] window.
+        num_chunks = (seq_len_q + num_tokens_per_cta - 1) // num_tokens_per_cta
+        num_tiles = (seq_len_kv + tile_size_kv - 1) // tile_size_kv
+        cta_starts = (
+            torch.arange(num_chunks, device=device) * num_tokens_per_cta
+        )  # [num_chunks]
+        if causal:
+            ki_first_end = seq_offset_q + cta_starts + 1
+            ki_last_end = seq_offset_q + cta_starts + num_tokens_per_cta
+        else:
+            ki_first_end = torch.full_like(cta_starts, seq_len_kv)
+            ki_last_end = torch.full_like(cta_starts, seq_len_kv)
+        if window_left >= 0:
+            ki_last_start = (ki_last_end - (window_left + 1)).clamp(min=0)
+        elif chunked_attention_size > 0:
+            ki_last_start = (
+                (seq_offset_q + cta_starts) // chunked_attention_size
+            ) * chunked_attention_size
+        else:
+            ki_last_start = torch.zeros_like(cta_starts)
 
-        # Iterate CTA chunks of Q rows (numTokensPerCta).
-        for cta_start_q in range(0, seq_len_q, num_tokens_per_cta):
-            cta_q_end = min(cta_start_q + num_tokens_per_cta, seq_len_q)
-            cta_rows = cta_q_end - cta_start_q
+        tile_starts = (
+            torch.arange(num_tiles, device=device) * tile_size_kv
+        )  # [num_tiles]
+        tile_ends = (tile_starts + tile_size_kv).clamp(max=seq_len_kv)
+        is_interior = (tile_starts.unsqueeze(0) >= ki_last_start.unsqueeze(1)) & (
+            tile_ends.unsqueeze(0) <= ki_first_end.unsqueeze(1)
+        )  # [num_chunks, num_tiles]
 
-            if causal:
-                ki_cta_first_end = seq_offset_q + cta_start_q + 1
-                ki_cta_last_end = seq_offset_q + cta_start_q + num_tokens_per_cta
+        # Apply 2:4 keep-largest in groups of 4 along K, but only inside
+        # interior tiles. Tail of < 4 elements is always dense (matches the
+        # kernel's `numGroups = numEltsInTile / 4` truncation).
+        n_full_groups = seq_len_kv // 4
+        if n_full_groups > 0:
+            groups_per_tile = tile_size_kv // 4
+            q_chunk_of_row = (
+                torch.arange(seq_len_q, device=device) // num_tokens_per_cta
+            )
+            tile_of_group = (
+                torch.arange(n_full_groups, device=device) // groups_per_tile
+            )
+            interior_per_group = is_interior[q_chunk_of_row][:, tile_of_group]
+            # [Lq, n_full_groups]
+
+            grouped = logits[..., : n_full_groups * 4].reshape(
+                num_qo_heads, seq_len_q, n_full_groups, 4
+            )
+            _, top_idx = torch.topk(grouped, k=2, dim=-1)
+            top2_keep = torch.zeros_like(grouped, dtype=torch.bool)
+            top2_keep.scatter_(-1, top_idx, True)
+            keep_groups = torch.where(
+                interior_per_group.view(1, seq_len_q, n_full_groups, 1),
+                top2_keep,
+                torch.ones_like(top2_keep),
+            )
+            keep_head = keep_groups.reshape(num_qo_heads, seq_len_q, n_full_groups * 4)
+            tail_len = seq_len_kv - n_full_groups * 4
+            if tail_len > 0:
+                keep_tail = torch.ones(
+                    num_qo_heads,
+                    seq_len_q,
+                    tail_len,
+                    dtype=torch.bool,
+                    device=device,
+                )
+                keep_mask = torch.cat([keep_head, keep_tail], dim=-1)
             else:
-                ki_cta_first_end = seq_len_kv
-                ki_cta_last_end = seq_len_kv
-            if window_left >= 0:
-                ki_cta_last_start = max(0, ki_cta_last_end - (window_left + 1))
-            elif chunked_attention_size > 0:
-                chunk_base = (
-                    (seq_offset_q + cta_start_q) // chunked_attention_size
-                ) * chunked_attention_size
-                ki_cta_last_start = chunk_base
-            else:
-                ki_cta_last_start = 0
+                keep_mask = keep_head
+            logits = torch.where(keep_mask, logits, float("-inf"))
 
-            # [Hq, cta_rows, D]
-            q_cta = q_t[:, cta_start_q:cta_q_end, :]
-
-            # Per-head running softmax state.
-            running_max = torch.full(
-                (num_qo_heads, cta_rows),
-                float("-inf"),
-                device=ref_q.device,
-                dtype=torch.float32,
+        # Sink: virtual K column at logit value sink[h], V row of zeros.
+        # Mathematically equivalent to the kernel's per-CTA sink fold because
+        # the sink logit is tile-invariant.
+        if sink is not None:
+            sink_col = (
+                sink.float().view(num_qo_heads, 1, 1).expand(num_qo_heads, seq_len_q, 1)
             )
-            running_sum = torch.zeros(
-                (num_qo_heads, cta_rows), device=ref_q.device, dtype=torch.float32
+            logits = torch.cat([logits, sink_col], dim=-1)
+            v_padded = torch.cat(
+                [
+                    v_t,
+                    torch.zeros(
+                        num_qo_heads, 1, head_dim, device=device, dtype=torch.float32
+                    ),
+                ],
+                dim=1,
             )
-            running_o = torch.zeros(
-                (num_qo_heads, cta_rows, head_dim),
-                device=ref_q.device,
-                dtype=torch.float32,
-            )
+        else:
+            v_padded = v_t
 
-            num_tiles = (seq_len_kv + tile_size_kv - 1) // tile_size_kv
-            for t in range(num_tiles):
-                tile_start = t * tile_size_kv
-                tile_end = min(tile_start + tile_size_kv, seq_len_kv)
-
-                # QK^T scaled. [Hq, cta_rows, tile_len]
-                logits = (
-                    torch.matmul(
-                        q_cta, k_t[:, tile_start:tile_end, :].transpose(-1, -2)
-                    )
-                    * sm_scale
-                )
-
-                # Apply causal / window / chunked mask within this tile.
-                # Per Q row r (cta-local index), the actual Q-row global K
-                # cutoff is `seq_offset_q + cta_start_q + r`.
-                if causal or window_left >= 0 or chunked_attention_size > 0:
-                    row_q_pos = (
-                        torch.arange(cta_rows, device=ref_q.device)
-                        + seq_offset_q
-                        + cta_start_q
-                    )  # [cta_rows]
-                    k_pos = torch.arange(
-                        tile_start, tile_end, device=ref_q.device
-                    )  # [tile_len]
-                    if causal:
-                        causal_mask = k_pos.unsqueeze(0) <= row_q_pos.unsqueeze(
-                            1
-                        )  # [cta_rows, tile_len]
-                    else:
-                        causal_mask = torch.ones(
-                            (cta_rows, tile_end - tile_start),
-                            dtype=torch.bool,
-                            device=ref_q.device,
-                        )
-                    if window_left >= 0:
-                        causal_mask = causal_mask & (
-                            row_q_pos.unsqueeze(1) - k_pos.unsqueeze(0) <= window_left
-                        )
-                    if chunked_attention_size > 0:
-                        q_chunk = (row_q_pos // chunked_attention_size).unsqueeze(1)
-                        k_chunk = (k_pos // chunked_attention_size).unsqueeze(0)
-                        causal_mask = causal_mask & (q_chunk == k_chunk)
-                    mask_for_logits = causal_mask.unsqueeze(
-                        0
-                    )  # [1, cta_rows, tile_len]
-                    logits = logits.masked_fill(~mask_for_logits, float("-inf"))
-
-                # Boundary detection: a tile is boundary if any Q row's mask cuts through this tile
-                is_boundary = (tile_start < ki_cta_last_start) or (
-                    tile_end > ki_cta_first_end
-                )
-                if not is_boundary:
-                    logits = _apply_2_of_4_keep_largest(logits)
-
-                # Online softmax update.
-                if sink is not None:
-                    pass
-
-                tile_max = logits.amax(dim=-1)  # [Hq, cta_rows]
-                # Avoid -inf propagation when an entire row in this tile is masked.
-                tile_max = torch.where(
-                    torch.isinf(tile_max) & (tile_max < 0),
-                    torch.full_like(tile_max, float("-inf")),
-                    tile_max,
-                )
-                new_max = torch.maximum(running_max, tile_max)
-                # Rescale running sum/output by exp(running_max - new_max).
-                # When new_max == -inf (no contributions yet), the rescale factor is 1.
-                alpha = torch.exp(
-                    torch.where(
-                        torch.isfinite(new_max),
-                        running_max - new_max,
-                        torch.zeros_like(new_max),
-                    )
-                )
-                # alpha is undefined where running_max==-inf and new_max==-inf;
-                # those entries are still zeroed by running_sum=0 / running_o=0.
-                exp_logits = torch.exp(
-                    logits - new_max.unsqueeze(-1)
-                )  # [Hq, cta_rows, tile_len]
-                # Replace any NaN (from -inf - -inf) with 0.
-                exp_logits = torch.nan_to_num(exp_logits, nan=0.0, posinf=0.0)
-                tile_sum = exp_logits.sum(dim=-1)  # [Hq, cta_rows]
-
-                # [Hq, cta_rows, D]
-                v_tile = v_t[:, tile_start:tile_end, :]
-                tile_o = torch.matmul(exp_logits, v_tile)
-
-                running_sum = running_sum * alpha + tile_sum
-                running_o = running_o * alpha.unsqueeze(-1) + tile_o
-                running_max = new_max
-
-            if sink is not None:
-                # Sink contributes a virtual K column with logit value `sink[h]`
-                # per head. Fold it into the denominator (and rescale) at the
-                # very end — equivalent to treating it as a once-only tile.
-                sink_logit = sink.float().unsqueeze(-1).expand(num_qo_heads, cta_rows)
-                new_max = torch.maximum(running_max, sink_logit)
-                alpha = torch.exp(
-                    torch.where(
-                        torch.isfinite(new_max),
-                        running_max - new_max,
-                        torch.zeros_like(new_max),
-                    )
-                )
-                running_o = running_o * alpha.unsqueeze(-1)
-                running_sum = running_sum * alpha + torch.exp(sink_logit - new_max)
-                running_max = new_max
-
-            # Finalize: divide by the running denominator. Rows with no
-            # contribution (running_sum == 0) stay zeros.
-            denom = running_sum.clamp(min=1e-30).unsqueeze(-1)
-            cta_out = running_o / denom  # [Hq, cta_rows, D]
-            out[q0 + cta_start_q : q0 + cta_q_end] = cta_out.transpose(0, 1)
+        # Single dense softmax. Rows with all -inf produce NaN; zero them so
+        # those Q positions contribute zeros to the output.
+        probs = torch.softmax(logits, dim=-1)
+        probs = torch.nan_to_num(probs, nan=0.0)
+        out_b = torch.matmul(probs, v_padded)  # [Hq, Lq, D]
+        out[q0:q1] = out_b.transpose(0, 1)
 
     return out
 
@@ -1331,8 +1274,8 @@ def test_trtllm_batch_prefill_bs1(
 )
 @pytest.mark.parametrize("enable_pdl", [None])
 @pytest.mark.parametrize("enable_sink", [False, True])
-@pytest.mark.parametrize("max_q_len", [511])
-@pytest.mark.parametrize("max_kv_len", [2047])
+@pytest.mark.parametrize("max_q_len", [511, 3023])
+@pytest.mark.parametrize("max_kv_len", [2047, 8192])
 def test_trtllm_batch_prefill_cubin_variants(
     kv_layout: str,
     batch_size: int,
