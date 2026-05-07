@@ -269,6 +269,8 @@ def get_trtllm_gen_prefill_module():
         value_block_scales: Optional[torch.Tensor] = None,
         skip_softmax_threshold_scale_factor: Optional[float] = None,
         uses_shared_paged_kv_idx: bool = True,
+        use_fp16_softmax: Optional[bool] = None,
+        uses_spcompress: Optional[bool] = None,
     ) -> torch.Tensor:
         sm_count = get_device_sm_count(query.device)
         if out is None:
@@ -306,8 +308,8 @@ def get_trtllm_gen_prefill_module():
             value_block_scales,
             skip_softmax_threshold_scale_factor,
             uses_shared_paged_kv_idx,
-            None,  # use_fp16_softmax — not surfaced through wrapper API yet
-            None,  # uses_spcompress — not surfaced through wrapper API yet
+            use_fp16_softmax,
+            uses_spcompress,
         )
         return out
 
@@ -679,6 +681,8 @@ def get_batch_prefill_module(backend, *args):
         value_block_scales: Optional[torch.Tensor] = None,
         skip_softmax_threshold_scale_factor: Optional[float] = None,
         uses_shared_paged_kv_idx: bool = True,
+        use_fp16_softmax: Optional[bool] = None,
+        uses_spcompress: Optional[bool] = None,
     ) -> None:
         if backend == "trtllm-gen":
             assert maybe_lse is None
@@ -716,6 +720,8 @@ def get_batch_prefill_module(backend, *args):
                 value_block_scales=value_block_scales,
                 skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
                 uses_shared_paged_kv_idx=uses_shared_paged_kv_idx,
+                use_fp16_softmax=use_fp16_softmax,
+                uses_spcompress=uses_spcompress,
             )
         elif backend == "fa2":
             assert not is_float8(q)
@@ -855,6 +861,8 @@ def get_batch_prefill_module(backend, *args):
         value_block_scales: Optional[torch.Tensor] = None,
         skip_softmax_threshold_scale_factor: Optional[float] = None,
         uses_shared_paged_kv_idx: bool = True,
+        use_fp16_softmax: Optional[bool] = None,
+        uses_spcompress: Optional[bool] = None,
     ) -> None:
         pass
 
@@ -2114,6 +2122,8 @@ class BatchPrefillWithPagedKVCacheWrapper:
         sinks: Optional[torch.Tensor] = None,
         kv_cache_sf: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         skip_softmax_threshold_scale_factor: Optional[float] = None,
+        use_fp16_softmax: Optional[bool] = None,
+        uses_spcompress: Optional[bool] = None,
     ) -> torch.Tensor: ...
 
     @overload
@@ -2132,6 +2142,8 @@ class BatchPrefillWithPagedKVCacheWrapper:
         sinks: Optional[torch.Tensor] = None,
         kv_cache_sf: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         skip_softmax_threshold_scale_factor: Optional[float] = None,
+        use_fp16_softmax: Optional[bool] = None,
+        uses_spcompress: Optional[bool] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]: ...
 
     @flashinfer_api
@@ -2151,6 +2163,8 @@ class BatchPrefillWithPagedKVCacheWrapper:
         sinks: Optional[torch.Tensor] = None,
         kv_cache_sf: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         skip_softmax_threshold_scale_factor: Optional[float] = None,
+        use_fp16_softmax: Optional[bool] = None,
+        uses_spcompress: Optional[bool] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         r"""Compute batch prefill/append attention between query and paged kv-cache.
 
@@ -2204,6 +2218,14 @@ class BatchPrefillWithPagedKVCacheWrapper:
 
             For the trtllm-gen backend with ``NHD`` layout, scale tensors are transposed
             to HND internally (incurring a copy). Use ``HND`` for better performance.
+        use_fp16_softmax : Optional[bool]
+            trtllm-gen backend only. Select the ``…Fp16Softmax…`` cubin variant
+            (FP16 softmax accumulator). Currently only shipped for BF16 Q/KV/O context
+            kernels. Ignored by other backends.
+        uses_spcompress : Optional[bool]
+            trtllm-gen backend only. Select the ``…Spcomp…`` cubin variant
+            (sparse compression). Currently only shipped for FP8 Q context kernels.
+            Ignored by other backends.
         Returns
         -------
         Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]
@@ -2439,6 +2461,8 @@ class BatchPrefillWithPagedKVCacheWrapper:
                     value_block_scales,
                     skip_softmax_threshold_scale_factor,
                     True,  # uses_shared_paged_kv_idx
+                    use_fp16_softmax,
+                    uses_spcompress,
                 ]
 
             assert self._cached_module is not None, "cached module is not initialized"

@@ -2081,7 +2081,6 @@ class TrtllmGenDecodeModule:
             value_block_scales,
             skip_softmax_threshold_scale_factor,
             uses_shared_paged_kv_idx,
-            None,  # use_fp16_softmax — not surfaced through wrapper API yet
         )
         return out
 
@@ -2260,7 +2259,6 @@ def trtllm_batch_decode_with_kv_cache(
     skip_softmax_threshold_scale_factor: Optional[float] = None,
     kv_cache_sf: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     uses_shared_paged_kv_idx: bool = True,
-    use_fp16_softmax: Optional[bool] = None,
 ) -> Union[torch.Tensor, FP4Tensor]:
     """
     Parameters
@@ -2380,14 +2378,6 @@ def trtllm_batch_decode_with_kv_cache(
         Whether the K and V page indices are shared as a unified index.
         True (default) uses vLLM/FlashInfer layout with a 2D page table.
         False uses TRT-LLM layout with a 3D page table ``[batch_size, 2, max_num_pages_per_seq]``.
-
-    use_fp16_softmax : Optional[bool] = None
-        Select the ``…Fp16Softmax…`` cubin variant (FP16 softmax accumulator) for
-        the trtllm-gen backend. Generation cubins with this variant are only
-        shipped for MLA head dims (``head_dim_qk/v ∈ {576/512, 320/256}``); for
-        non-MLA decode shapes the launcher rejects this with a clear error.
-        Use ``flashinfer.mla._core.trtllm_batch_decode_with_kv_cache_mla`` for
-        the MLA decode entrypoint.
 
     Returns
     -------
@@ -2616,7 +2606,6 @@ def trtllm_batch_decode_with_kv_cache(
             v_block_scales,
             skip_softmax_threshold_scale_factor,
             uses_shared_paged_kv_idx,
-            use_fp16_softmax,
         )
 
         return (
