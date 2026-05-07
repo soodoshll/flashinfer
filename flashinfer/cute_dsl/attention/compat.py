@@ -7,7 +7,11 @@ Centralizes version-dependent API lookups so kernel and role files don't
 each carry their own copies.
 """
 
+import torch
+
 import cutlass.cute as cute
+
+from ...utils import get_compute_capability
 
 
 # setmaxregister_{decrease,increase} added in cutlass-dsl 4.4;
@@ -26,7 +30,13 @@ setmaxregister_increase = getattr(
 
 # get_max_tmem_alloc_cols added in cutlass-dsl 4.4;
 # older versions don't have it.
-_TMEM_MAX_ALLOC_COLUMNS_MAP = {"sm_100": 512, "sm_103": 512, "sm_120": 512}
+_TMEM_MAX_ALLOC_COLUMNS_MAP = {
+    "sm_100": 512,
+    "sm_103": 512,
+    "sm_120": 512,
+    "sm_107": 576,
+    "sm_109": 576,
+}
 
 
 def get_max_tmem_alloc_cols(compute_capability: str) -> int:
@@ -35,3 +45,10 @@ def get_max_tmem_alloc_cols(compute_capability: str) -> int:
     if compute_capability not in _TMEM_MAX_ALLOC_COLUMNS_MAP:
         raise ValueError(f"Unsupported compute capability: {compute_capability}")
     return _TMEM_MAX_ALLOC_COLUMNS_MAP[compute_capability]
+
+
+def get_current_arch() -> str:
+    """Return the cutlass-dsl arch string ('sm_100', 'sm_103', 'sm_107', ...)
+    for the current default CUDA device."""
+    major, minor = get_compute_capability(torch.device("cuda"))
+    return f"sm_{major}{minor}"
