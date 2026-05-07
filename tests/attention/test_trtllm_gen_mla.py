@@ -489,11 +489,6 @@ def trtllm_batch_decode_mla(
         else:
             rtol, atol = 1e-2, 1e-2
 
-        # Widen only for the use_fp16_softmax=True cell per plan.md
-        # ("use_fp16_softmax=True tolerance policy"): the FP16-accumulator
-        # softmax in MLA generation cubins introduces noise above the FP32
-        # baseline. ~3x widening on the BF16 path is sufficient; FP8 stays
-        # at its already-loose 1e-1 because the dominant error is FP8 quant.
         if use_fp16_softmax and dtype != torch.float8_e4m3fn:
             rtol, atol = 3e-2, 3e-2
 

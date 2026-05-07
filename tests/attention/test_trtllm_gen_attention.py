@@ -346,9 +346,6 @@ def _apply_2_of_4_keep_largest(logits: torch.Tensor) -> torch.Tensor:
     tail = logits[..., num_groups * 4 :]
     # Reshape head to groups of 4 and keep top-2.
     grouped = head.reshape(*head.shape[:-1], num_groups, 4)
-    # topk on float32 is stable enough; ties tie-break naturally — at fp32 the
-    # difference vs the kernel's sorting-network tie-break is below FP8/BF16
-    # output tolerance.
     _, top_idx = torch.topk(grouped, k=2, dim=-1)
     keep_mask = torch.zeros_like(grouped, dtype=torch.bool)
     keep_mask.scatter_(-1, top_idx, True)
@@ -434,9 +431,6 @@ def _spcompress_reference(
             cta_rows = cta_q_end - cta_start_q
 
             if causal:
-                # See FmhaReference.cu:218-363. The boundary formulas use the
-                # nominal CTA size (num_tokens_per_cta) even when the tail CTA
-                # is partially filled — this matches the kernel exactly.
                 ki_cta_first_end = seq_offset_q + cta_start_q + 1
                 ki_cta_last_end = seq_offset_q + cta_start_q + num_tokens_per_cta
             else:
@@ -519,8 +513,7 @@ def _spcompress_reference(
                     )  # [1, cta_rows, tile_len]
                     logits = logits.masked_fill(~mask_for_logits, float("-inf"))
 
-                # Boundary detection: a tile is boundary if any Q row's mask
-                # cuts through this tile (per FmhaReference.cu:218-363).
+                # Boundary detection: a tile is boundary if any Q row's mask cuts through this tile
                 is_boundary = (tile_start < ki_cta_last_start) or (
                     tile_end > ki_cta_first_end
                 )
@@ -1734,16 +1727,24 @@ def _test_trtllm_batch_decode(
             assert (output_wrapper == output).all()
         else:
             # todo(Yingyi): fix precision issue with this test
-            if not (
-                q_dtype == "fp8"
-                and kv_dtype == "fp8"
-                and o_dtype == "fp8"
-                and batch_size == 256
-                and q_len_per_req == 3
-                and page_size == 64
-                and num_kv_heads == 4
-                and head_grp_size == 5
-            ):
+            fp8_ulp_boundary_shapes = {
+                # (batch_size, q_len_per_req, page_size, num_kv_heads, head_grp_size)
+                (256, 3, 64, 4, 5),
+                (256, 2, 16, 2, 8),
+            }
+            is_fp8_all = q_dtype == "fp8" and kv_dtype == "fp8" and o_dtype == "fp8"
+            is_known_boundary = (
+                is_fp8_all
+                and (
+                    batch_size,
+                    q_len_per_req,
+                    page_size,
+                    num_kv_heads,
+                    head_grp_size,
+                )
+                in fp8_ulp_boundary_shapes
+            )
+            if not is_known_boundary:
                 torch.testing.assert_close(
                     output.float(),
                     output_wrapper.float(),
