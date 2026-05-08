@@ -51,6 +51,7 @@ from .jit.fp4_quantization import (
     gen_fp4_quantization_sm90_module,
     gen_fp4_quantization_sm100_module,
     gen_fp4_quantization_sm103_module,
+    gen_fp4_quantization_sm107_module,
     gen_fp4_quantization_sm110_module,
     gen_fp4_quantization_sm120_module,
     gen_fp4_quantization_sm120f_module,
@@ -463,6 +464,7 @@ def gen_all_modules(
     has_sm100 = sm_capabilities.get("sm100", False)
     has_sm100f = sm_capabilities.get("sm100f", False)
     has_sm103 = sm_capabilities.get("sm103", False)
+    has_sm107 = sm_capabilities.get("sm107", False)
     has_sm110 = sm_capabilities.get("sm110", False)
     has_sm120 = sm_capabilities.get("sm120", False)
     has_sm120f = sm_capabilities.get("sm120f", False)
@@ -523,6 +525,8 @@ def gen_all_modules(
         if has_sm103:
             jit_specs.append(gen_fp4_quantization_sm103_module())
             jit_specs.append(gen_cutlass_fused_moe_sm103_module())
+        if has_sm107:
+            jit_specs.append(gen_fp4_quantization_sm107_module())
         if has_sm110:
             jit_specs.append(gen_fp4_quantization_sm110_module())
         if has_sm120:

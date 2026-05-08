@@ -272,6 +272,7 @@ def trtllm_batch_decode_mla(
     MAX_SEQ_LEN: int,
     skips_softmax: bool,
     uses_shared_paged_kv_idx: bool = True,
+    use_fp16_softmax: bool = False,
 ):
     compute_capability = get_compute_capability(torch.device(device="cuda"))
     if backend == "xqa":
@@ -302,6 +303,9 @@ def trtllm_batch_decode_mla(
 
     if skips_softmax and backend != "trtllm-gen":
         pytest.skip("skips_softmax is only supported for trtllm-gen backend")
+
+    if use_fp16_softmax and backend != "trtllm-gen":
+        pytest.skip("use_fp16_softmax=True is only supported for trtllm-gen backend")
 
     torch.manual_seed(42)
     device = "cuda:0"
@@ -407,6 +411,7 @@ def trtllm_batch_decode_mla(
         enable_pdl=enable_pdl,
         backend=backend,
         uses_shared_paged_kv_idx=uses_shared_paged_kv_idx,
+        use_fp16_softmax=use_fp16_softmax,
     )
     # check if the first 8192 * 256 * 4 bytes of workspace_buffer is zero
     # note(Yingyi): the first 8192 * 256 * 4 bytes of workspace_buffer is the counter workspace, size might change in the future
@@ -483,6 +488,9 @@ def trtllm_batch_decode_mla(
             rtol, atol = 1e-1, 1e-1
         else:
             rtol, atol = 1e-2, 1e-2
+
+        if use_fp16_softmax and dtype != torch.float8_e4m3fn:
+            rtol, atol = 3e-2, 3e-2
 
         try:
             torch.testing.assert_close(output, o_ref_view, rtol=rtol, atol=atol)
@@ -981,3 +989,35 @@ def test_trtllm_batch_decode_mla_preallocated_out(
     )
     assert result_pre.shape == expected_shape
     torch.testing.assert_close(result_none, result_pre, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.parametrize(
+    "layer_dimensions",
+    supported_mla_layer_dimensions,
+)
+@pytest.mark.parametrize("batch_size", [1, 16, 128])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("page_size", [32, 64])
+@pytest.mark.parametrize("q_len_per_request", [1, 2])
+def test_trtllm_batch_decode_mla_use_fp16_softmax(
+    layer_dimensions: MLALayerDimensions,
+    batch_size: int,
+    dtype: torch.dtype,
+    page_size: int,
+    q_len_per_request: int,
+):
+    trtllm_batch_decode_mla(
+        layer_dimensions=layer_dimensions,
+        batch_size=batch_size,
+        scale=1.0,
+        dtype=dtype,
+        page_size=page_size,
+        q_len_per_request=q_len_per_request,
+        dynamic_scale=False,
+        enable_pdl=None,
+        backend="trtllm-gen",
+        MAX_SEQ_LEN=1024,
+        skips_softmax=False,
+        uses_shared_paged_kv_idx=True,
+        use_fp16_softmax=True,
+    )

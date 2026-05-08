@@ -609,6 +609,7 @@ def trtllm_batch_decode_with_kv_cache_mla(
     backend: str = "auto",
     is_var_seq: bool = True,
     uses_shared_paged_kv_idx: bool = True,
+    use_fp16_softmax: Optional[bool] = None,
 ) -> torch.Tensor:
     """
     Parameters
@@ -654,6 +655,13 @@ def trtllm_batch_decode_with_kv_cache_mla(
         True (default) uses vLLM/FlashInfer layout with a 2D page table.
         False uses TRT-LLM layout with a 3D page table ``[batch_size, 2, max_num_pages_per_seq]``.
         False is only supported for trtllm-gen backend.
+    use_fp16_softmax : Optional[bool]
+        Select the trtllm-gen ``Fp16Softmax`` cubin variant. MLA decode is the
+        primary consumer of this flag — `Fp16Softmax` generation cubins are
+        only shipped for MLA head dims (``head_dim_qk/v ∈ {576/512, 320/256}``).
+        When ``None`` (default) or ``False`` the standard FP32-accumulator
+        softmax cubin is used. Only supported by ``backend="trtllm-gen"``;
+        passing ``True`` to other backends raises ``ValueError``.
 
     Note
     ----
@@ -703,6 +711,10 @@ def trtllm_batch_decode_with_kv_cache_mla(
         if not uses_shared_paged_kv_idx:
             raise ValueError(
                 "XQA MLA does not support separate KV page indices (uses_shared_paged_kv_idx=False)"
+            )
+        if use_fp16_softmax:
+            raise ValueError(
+                "use_fp16_softmax is only supported by backend='trtllm-gen'"
             )
         return xqa_batch_decode_with_kv_cache_mla(
             query,
@@ -795,6 +807,7 @@ def trtllm_batch_decode_with_kv_cache_mla(
             None,  # value_block_scales
             skip_softmax_threshold_scale_factor,
             uses_shared_paged_kv_idx,
+            use_fp16_softmax,
         )
 
         return out
@@ -835,6 +848,10 @@ def trtllm_batch_decode_with_kv_cache_mla(
             raise ValueError(
                 "cute-dsl backend (MLA decode kernel) does not support separate KV page indices "
                 "(uses_shared_paged_kv_idx=False)"
+            )
+        if use_fp16_softmax:
+            raise ValueError(
+                "cute-dsl backend (MLA decode kernel) does not support use_fp16_softmax"
             )
 
         return cute_dsl_mla_decode(
