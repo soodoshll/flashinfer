@@ -41,8 +41,8 @@ from ...autotuner import (
 )
 from ...utils import get_compute_capability
 from ..utils import (
-    get_last_power_of_2_num_tokens_buckets,
-    last_positive_power_of_2,
+    get_hybrid_num_tokens_buckets,
+    map_to_hybrid_bucket_uncapped,
 )
 
 logger = logging.getLogger(__name__)
@@ -94,6 +94,46 @@ def get_blackwell_gemm2_valid_tactics(tile_size: int) -> List[Tuple]:
     ]
 
 
+# =============================================================================
+# GEMM2 Tactics (Finalize Fusion)
+# =============================================================================
+# Reference: TRT-LLM cute_dsl_custom_ops.py line 1165-1202
+# Sm100BlockScaledContiguousGroupedGemmFinalizeFusionRunner.get_valid_tactics
+#
+# Format: (mma_tiler_mn, cluster_shape_mn, raster_along_m)
+# - mma_tiler_mn: (tile_size, N_tile) where N_tile is 128 or 256.
+#   At tile_size=256 use_2cta_instrs=True, so mma_m doubles to 256.
+# - cluster_shape_mn: (tile_size // 128, cluster_n) where cluster_n is 1 or 2.
+#   At tile_size=256 cluster_m=2 (2-CTA); at tile_size=128 cluster_m=1.
+# - raster_along_m: False (fixed, theoretically more performant)
+
+
+def get_gemm2_valid_tactics(tile_size: int) -> List[Tuple]:
+    """Get valid tactics for GEMM2 (Finalize Fusion).
+
+    Reference: TRT-LLM cute_dsl_custom_ops.py line 1165-1202
+
+    The finalize kernel's MMA shape must match tile_size because the
+    kernel consumes the upstream gemm1 output layout. At tile_size=128
+    the kernel uses 1-CTA mma_m=128; at tile_size=256 it uses 2-CTA
+    mma_m=256 (use_2cta_instrs=True). Returning a 1-CTA gemm2 tactic
+    when tile_size=256 yields a layout mismatch and incorrect output.
+
+    Args:
+        tile_size: Tile size for moe_sort padding (128 or 256).
+            Determines mma_tiler_mn[0] and cluster_shape_mn[0].
+
+    Returns:
+        List of (mma_tiler_mn, cluster_shape_mn, raster_along_m) tuples
+    """
+    mma_tiler_mn_candidates = [(tile_size, 128), (tile_size, 256)]
+    cluster_shape_mn_candidates = [
+        (tile_size // 128, 1),
+        (tile_size // 128, 2),
+    ]
+    
+
+
 def get_blackwell_moe_valid_tactics() -> List[Tuple]:
     """Get all valid Blackwell MoE tactic combinations.
 
@@ -106,14 +146,50 @@ def get_blackwell_moe_valid_tactics() -> List[Tuple]:
     for tile_size in [128]:
         gemm1_tactics = get_blackwell_gemm1_valid_tactics(tile_size)
         gemm2_tactics = get_blackwell_gemm2_valid_tactics(tile_size)
-
         for gemm1_tactic, gemm2_tactic in itertools.product(
             gemm1_tactics, gemm2_tactics
         ):
             tactics.append((tile_size, gemm1_tactic, gemm2_tactic))
     return tactics
 
+# Canonical list of tile_sizes the autotuner is allowed to pick.  Used by
+# ``get_moe_valid_tactics`` for tactic enumeration AND by
+# ``CuteDslMoEWrapper`` to size its preallocated kernel-output buffers so
+# every tactic in this list can reuse the prealloc, regardless of which
+# tile_size the autotuner picks at runtime.  Adding a new tile_size here
+# automatically widens the prealloc.
+VALID_TILE_SIZES: Tuple[int, ...] = (128, 256)
 
+
+def get_moe_valid_tactics() -> List[Tuple]:
+    """Get all valid MoE tactic combinations.
+
+    Each tactic is a tuple: (tile_size, gemm1_tactic, gemm2_tactic)
+
+    The tile_size must be shared between GEMM1 and GEMM2 because:
+    1. moe_sort uses tile_size to pad tokens to tile boundaries
+    2. Both GEMMs process the same padded token sequence
+
+    Returns:
+        List of (tile_size, gemm1_tactic, gemm2_tactic) tuples
+    """
+    tactics = []
+
+    # Enable both 1-CTA (tile_size=128) and 2-CTA (tile_size=256,
+    # use_2cta_instrs=True) variants; the autotuner picks per shape.
+    # tile_size=256 typically wins at large batch where 2-CTA throughput
+    # exceeds 1-CTA.
+    for tile_size in VALID_TILE_SIZES:
+        gemm1_tactics = get_gemm1_valid_tactics(tile_size)
+        gemm2_tactics = get_gemm2_valid_tactics(tile_size)
+
+# Pre-generate all valid tactics
+# tile_size=128: 2 GEMM1 tactics × 4 GEMM2 tactics = 8
+# tile_size=256: 2 GEMM1 tactics × 4 GEMM2 tactics = 8
+# Total: 16 tactics
+ALL_MOE_TACTICS = get_moe_valid_tactics()
+
+        
 # =============================================================================
 # Rubin (SM107) Tactics
 # =============================================================================
@@ -122,8 +198,6 @@ def get_blackwell_moe_valid_tactics() -> List[Tuple]:
 #
 # Format: (mma_tiler, mma_inst_shape, cluster_shape_mn, raster_along_m)
 # where mma_tiler = (M, N, K) and mma_inst_shape = (M', N, K')
-
-
 def get_rubin_gemm1_valid_tactics(tile_size: int) -> List[Tuple]:
     """Get valid Rubin tactics for GEMM1 (Gather + SwiGLU Fusion).
 
@@ -398,10 +472,12 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
                 DynamicTensorSpec(
                     input_idx=(0, 1, 2, 3, 11),
                     dim_idx=(0, 0, 0, 0, 0),
-                    gen_tuning_buckets=get_last_power_of_2_num_tokens_buckets(8192),
-                    map_to_tuning_buckets=lambda x: min(
-                        last_positive_power_of_2(x), 8192
-                    ),
+                    # Bare callables: autotuner adapts the bucket set to
+                    # the actual input dim (matches the
+                    # _FP8_GEMM_SM100_TUNING_CONFIG pattern in
+                    # `gemm/gemm_base.py`).
+                    gen_tuning_buckets=get_hybrid_num_tokens_buckets,
+                    map_to_tuning_buckets=map_to_hybrid_bucket_uncapped,
                     tensor_initializers=[
                         # 0: x — FP4 quantized input (uint8 packed)
                         lambda shapes, dtype, device: torch.randint(

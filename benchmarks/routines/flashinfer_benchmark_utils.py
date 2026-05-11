@@ -91,6 +91,7 @@ output_column_dict = {
         "scale",
         "eps",
         "use_global_scale",
+        "dit_mode",
     ],
     "quantization": [
         "alignment",
@@ -187,6 +188,7 @@ benchmark_apis = {
         "mm_mxfp8",
         "mm_bf16",
         "bmm_bf16",
+        "tinygemm_bf16",
     ],
     "moe": [
         "trtllm_fp4_block_scale_moe",
@@ -194,6 +196,7 @@ benchmark_apis = {
         "trtllm_fp8_per_tensor_scale_moe",
         "cutlass_fused_moe",
         "cute_dsl_fp4_block_scale_moe",
+        "b12x_fused_moe",
     ],
     "moe_comm": [
         "moe_a2a_dispatch_combine",
@@ -211,6 +214,7 @@ benchmark_apis = {
         "rmsnorm_fp4quant",
         "add_rmsnorm_fp4quant",
         "fused_rmsnorm_silu",
+        "fused_dit_layernorm",
     ],
     "quantization": [
         "mxfp8_quantize",
@@ -317,30 +321,45 @@ routine_cc_to_supported_backends = {
     },
     "BatchPrefillWithPagedKVCacheWrapper": {
         # NOTE: trtllm-native calls trtllm_batch_context_with_kv_cache
+        # NOTE: trtllm-fmha-v2 calls trtllm_fmha_v2_prefill
         # NOTE: cudnn-native calls cudnn_batch_prefill_with_kv_cache
         "7.5": [],
         "8.0": ["fa2", "auto", "cudnn", "cudnn-native"],
         "8.6": ["fa2", "auto", "cudnn", "cudnn-native"],
         "8.9": ["fa2", "auto", "cudnn", "cudnn-native"],
-        "9.0": ["fa2", "fa3", "auto", "cudnn", "cudnn-native"],
+        "9.0": ["fa2", "fa3", "auto", "cudnn", "cudnn-native", "trtllm-fmha-v2"],
         "10.0": ["fa2", "auto", "cudnn", "cudnn-native", "trtllm-gen", "trtllm-native"],
         "10.3": ["fa2", "auto", "cudnn", "cudnn-native", "trtllm-gen", "trtllm-native"],
         "10.7": ["fa2", "auto", "cudnn", "cudnn-native", "trtllm-gen", "trtllm-native"],
-        "12.0": ["fa2", "auto", "cudnn", "cudnn-native"],
+        "12.0": ["fa2", "auto", "cudnn", "cudnn-native", "trtllm-fmha-v2"],
         "12.1": ["fa2", "auto", "cudnn", "cudnn-native"],
     },
     "BatchPrefillWithRaggedKVCacheWrapper": {
         # NOTE: trtllm-native calls trtllm_ragged_attention_deepseek
+        # NOTE: trtllm-fmha-v2 calls trtllm_fmha_v2_prefill
         # NOTE: cudnn-native calls cudnn_batch_prefill_with_kv_cache
         "7.5": [],
         "8.0": ["fa2", "cudnn", "cudnn-native"],
         "8.6": ["fa2", "cudnn", "cudnn-native"],
         "8.9": ["fa2", "cudnn", "cudnn-native"],
-        "9.0": ["fa2", "fa3", "cudnn", "cudnn-native"],
-        "10.0": ["fa2", "cudnn", "cudnn-native", "cutlass", "trtllm-native"],
-        "10.3": ["fa2", "cudnn", "cudnn-native", "cutlass", "trtllm-native"],
-        "10.7": ["fa2", "cudnn", "cudnn-native", "cutlass", "trtllm-native"],
-        "12.0": ["fa2", "cudnn", "cudnn-native"],
+        "9.0": ["fa2", "fa3", "cudnn", "cudnn-native", "trtllm-fmha-v2"],
+        "10.0": [
+            "fa2",
+            "cudnn",
+            "cudnn-native",
+            "cutlass",
+            "cute-dsl",
+            "trtllm-native",
+        ],
+        "10.3": [
+            "fa2",
+            "cudnn",
+            "cudnn-native",
+            "cutlass",
+            "cute-dsl",
+            "trtllm-native",
+        ],
+        "12.0": ["fa2", "cudnn", "cudnn-native", "trtllm-fmha-v2"],
         "12.1": ["fa2", "cudnn", "cudnn-native"],
     },
     "BatchMLAPagedAttentionWrapper": {
@@ -417,6 +436,18 @@ routine_cc_to_supported_backends = {
         "12.0": [],
         "12.1": [],
     },
+    "tinygemm_bf16": {
+        "7.5": [],
+        "8.0": [],
+        "8.6": [],
+        "8.9": [],
+        "9.0": ["tinygemm"],
+        "10.0": ["tinygemm"],
+        "10.3": ["tinygemm"],
+        "11.0": ["tinygemm"],
+        "12.0": ["tinygemm"],
+        "12.1": ["tinygemm"],
+    },
     # Note: mm_fp4, mm_bf16, and bmm_bf16 use support checkers to filter backends, so they are not listed here
     # MOE
     "trtllm_fp4_block_scale_moe": {
@@ -475,8 +506,19 @@ routine_cc_to_supported_backends = {
         "9.0": [],
         "10.0": ["cute-dsl"],
         "10.3": ["cute-dsl"],
-        "12.0": ["cute-dsl"],
-        "12.1": ["cute-dsl"],
+        "12.0": [],
+        "12.1": [],
+    },
+    "b12x_fused_moe": {
+        "7.5": [],
+        "8.0": [],
+        "8.6": [],
+        "8.9": [],
+        "9.0": [],
+        "10.0": [],
+        "10.3": [],
+        "12.0": ["b12x"],
+        "12.1": ["b12x"],
     },
     # NORM
     "rmsnorm": {

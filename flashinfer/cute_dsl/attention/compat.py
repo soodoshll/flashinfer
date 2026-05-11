@@ -36,6 +36,7 @@ _TMEM_MAX_ALLOC_COLUMNS_MAP = {
     "sm_120": 512,
     "sm_107": 576,
     "sm_109": 576,
+    "sm_121": 512,
 }
 
 

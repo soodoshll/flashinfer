@@ -21,6 +21,17 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 
 from ..api_logging import flashinfer_api
+from ..trace.templates.moe import (
+    cutlass_fused_moe_trace,
+    trtllm_bf16_moe_trace,
+    trtllm_bf16_routed_moe_trace,
+    trtllm_fp4_block_scale_moe_trace_dispatch,
+    trtllm_fp4_block_scale_routed_moe_trace,
+    trtllm_fp8_block_scale_moe_trace_dispatch,
+    trtllm_fp8_block_scale_routed_moe_trace,
+    trtllm_fp8_per_tensor_scale_moe_trace,
+    trtllm_mxint4_block_scale_moe_trace,
+)
 from ..autotuner import (
     AutoTuner,
     DynamicTensorSpec,
@@ -51,8 +62,8 @@ from ..utils import (
     get_compute_capability,
 )
 from .utils import (
-    get_last_power_of_2_num_tokens_buckets,
-    last_positive_power_of_2,
+    get_hybrid_num_tokens_buckets,
+    map_to_hybrid_bucket,
 )
 from ..tllm_enums import (
     ActivationType,
@@ -234,8 +245,8 @@ def get_cutlass_fused_moe_module(backend: str = "100", use_fast_build: bool = Fa
                 DynamicTensorSpec(
                     (0,),
                     (0,),
-                    get_last_power_of_2_num_tokens_buckets(8192),
-                    lambda x: min(last_positive_power_of_2(x), 8192),
+                    get_hybrid_num_tokens_buckets(8192),
+                    lambda x: map_to_hybrid_bucket(x, 8192),
                 ),
             )
         )
@@ -402,8 +413,8 @@ def get_cutlass_fused_moe_module(backend: str = "100", use_fast_build: bool = Fa
                     DynamicTensorSpec(
                         (0,),
                         (0,),
-                        get_last_power_of_2_num_tokens_buckets(tune_max_num_tokens),
-                        lambda x: min(last_positive_power_of_2(x), tune_max_num_tokens),
+                        get_hybrid_num_tokens_buckets(tune_max_num_tokens),
+                        lambda x: map_to_hybrid_bucket(x, tune_max_num_tokens),
                     ),
                 )
             )
@@ -739,7 +750,7 @@ def interleave_moe_weights_for_sm90_mixed_gemm(
 
 
 # ref: https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/_torch/custom_ops/torch_custom_ops.py#L121
-@flashinfer_api
+@flashinfer_api(trace=cutlass_fused_moe_trace)
 def cutlass_fused_moe(
     input: torch.Tensor,
     token_selected_experts: torch.Tensor,
@@ -988,6 +999,7 @@ class MoEInputs:
     expert_weights: Optional[torch.Tensor]
     hidden_states: torch.Tensor
     hidden_states_scale: Optional[torch.Tensor]
+    per_token_scale: Optional[torch.Tensor]
 
     _FIELDS = (
         "output",
@@ -996,6 +1008,7 @@ class MoEInputs:
         "expert_weights",
         "hidden_states",
         "hidden_states_scale",
+        "per_token_scale",
     )
 
     # Index of the dynamic dimension for each field.
@@ -1008,6 +1021,7 @@ class MoEInputs:
         "topk_ids": 0,
         "expert_weights": 0,
         "hidden_states": 0,
+        "per_token_scale": 0,
     }
 
     def to_list(self) -> List[Optional[torch.Tensor]]:
@@ -1046,6 +1060,8 @@ def get_trtllm_moe_sm100_module():
             use_shuffled_weight: bool = False,
             weight_layout: int = WeightLayout.MajorK,
             use_packed_weights: bool = False,
+            use_per_token_scaling: bool = False,
+            num_experts: Optional[int] = None,
         ):
             self.num_local_experts = num_local_experts
             self.top_k = top_k
@@ -1058,6 +1074,10 @@ def get_trtllm_moe_sm100_module():
             self.use_shuffled_weight = use_shuffled_weight
             self.weight_layout = WeightLayout(weight_layout)
             self.use_packed_weights = use_packed_weights
+            self.use_per_token_scaling = use_per_token_scaling
+            self.num_experts = (
+                num_experts if num_experts is not None else num_local_experts
+            )
 
         def _make_tuning_config(
             self,
@@ -1072,11 +1092,11 @@ def get_trtllm_moe_sm100_module():
                 tune_max_num_tokens: Upper bound for the num_tokens tuning buckets.
                 **kwargs: Extra TuningConfig kwargs (e.g. use_cold_l2_cache).
             """
-            num_local_experts = self.num_local_experts
+            num_experts = self.num_experts
 
             def _init_packed_topk_ids(shapes, dtype, device):
                 expert_ids = torch.randint(
-                    0, num_local_experts, shapes, dtype=torch.int32, device=device
+                    0, num_experts, shapes, dtype=torch.int32, device=device
                 )
                 expert_weights = torch.ones(
                     shapes, dtype=torch.bfloat16, device=device
@@ -1103,6 +1123,10 @@ def get_trtllm_moe_sm100_module():
                 )
             if moe_inputs.hidden_states_scale is not None:
                 spec["hidden_states_scale"] = lambda shapes, dtype, device: torch.ones(
+                    shapes, device=device
+                ).to(dtype)
+            if moe_inputs.per_token_scale is not None:
+                spec["per_token_scale"] = lambda shapes, dtype, device: torch.ones(
                     shapes, device=device
                 ).to(dtype)
 
@@ -1140,8 +1164,8 @@ def get_trtllm_moe_sm100_module():
                     DynamicTensorSpec(
                         input_idx,
                         dim_idx,
-                        get_last_power_of_2_num_tokens_buckets(tune_max_num_tokens, 1),
-                        lambda x: min(last_positive_power_of_2(x), tune_max_num_tokens),
+                        get_hybrid_num_tokens_buckets(tune_max_num_tokens, 1),
+                        lambda x: map_to_hybrid_bucket(x, tune_max_num_tokens),
                         initializers,
                     ),
                 ),
@@ -1167,6 +1191,7 @@ def get_trtllm_moe_sm100_module():
                 self.activation_type,
                 self.use_shuffled_weight,
                 self.weight_layout,
+                self.use_per_token_scaling,
                 num_tokens,
             )
             if instance_key not in MoERunner.valid_tactics_dict:
@@ -1406,6 +1431,7 @@ def get_trtllm_moe_sm100_module():
                     kwargs["output1_scale_scalar"],
                     kwargs["output1_scale_gate_scalar"],
                     kwargs["output2_scale_scalar"],
+                    kwargs["per_token_scale"],
                     kwargs["num_experts"],
                     self.top_k,
                     kwargs["n_group"],
@@ -1501,6 +1527,7 @@ def get_trtllm_moe_sm100_module():
             weight_layout=weight_layout,
             use_shuffled_weight=use_shuffled_weight,
             activation_type=activation_type,
+            num_experts=num_experts,
         )
 
         moe_inputs = MoEInputs(
@@ -1510,6 +1537,7 @@ def get_trtllm_moe_sm100_module():
             expert_weights=expert_weights,
             hidden_states=hidden_states,
             hidden_states_scale=None,
+            per_token_scale=None,
         )
         tuning_config = moe_runner._make_tuning_config(
             moe_inputs,
@@ -1673,6 +1701,7 @@ def get_trtllm_moe_sm100_module():
             weight_layout=WeightLayout.MajorK,
             use_shuffled_weight=True,
             activation_type=activation_type,
+            num_experts=num_experts,
         )
 
         moe_inputs = MoEInputs(
@@ -1682,6 +1711,7 @@ def get_trtllm_moe_sm100_module():
             expert_weights=expert_weights,
             hidden_states=hidden_states,
             hidden_states_scale=None,
+            per_token_scale=None,
         )
         tuning_config = moe_runner._make_tuning_config(
             moe_inputs,
@@ -1892,6 +1922,7 @@ def get_trtllm_moe_sm100_module():
             activation_type=activation_type,
             weight_layout=weight_layout,
             use_shuffled_weight=use_shuffled_weight,
+            num_experts=num_experts,
         )
 
         moe_inputs = MoEInputs(
@@ -1901,6 +1932,7 @@ def get_trtllm_moe_sm100_module():
             expert_weights=expert_weights,
             hidden_states=hidden_states,
             hidden_states_scale=hidden_states_scale,
+            per_token_scale=None,
         )
         tuning_config = moe_runner._make_tuning_config(
             moe_inputs,
@@ -2038,6 +2070,7 @@ def get_trtllm_moe_sm100_module():
         output1_scale_scalar: Optional[torch.Tensor],
         output1_scale_gate_scalar: Optional[torch.Tensor],
         output2_scale_scalar: Optional[torch.Tensor],
+        per_token_scale: Optional[torch.Tensor],
         num_experts: int,
         top_k: int,
         n_group: Optional[int],
@@ -2113,6 +2146,8 @@ def get_trtllm_moe_sm100_module():
             activation_type=activation_type,
             weight_layout=WeightLayout.MajorK,
             use_shuffled_weight=True,
+            use_per_token_scaling=per_token_scale is not None,
+            num_experts=num_experts,
         )
         moe_inputs = MoEInputs(
             output=output,
@@ -2121,6 +2156,7 @@ def get_trtllm_moe_sm100_module():
             expert_weights=expert_weights,
             hidden_states=hidden_states,
             hidden_states_scale=hidden_states_scale,
+            per_token_scale=per_token_scale,
         )
         tuning_config = moe_runner._make_tuning_config(
             moe_inputs,
@@ -2148,6 +2184,7 @@ def get_trtllm_moe_sm100_module():
             output1_scale_scalar=output1_scale_scalar,
             output1_scale_gate_scalar=output1_scale_gate_scalar,
             output2_scale_scalar=output2_scale_scalar,
+            per_token_scale=per_token_scale,
             n_group=n_group,
             topk_group=topk_group,
             local_expert_offset=local_expert_offset,
@@ -2178,6 +2215,7 @@ def get_trtllm_moe_sm100_module():
             output1_scale_scalar,
             output1_scale_gate_scalar,
             output2_scale_scalar,
+            per_token_scale,
             num_experts,
             top_k,
             n_group,
@@ -2224,6 +2262,7 @@ def get_trtllm_moe_sm100_module():
         output1_scale_scalar: Optional[torch.Tensor],
         output1_scale_gate_scalar: Optional[torch.Tensor],
         output2_scale_scalar: Optional[torch.Tensor],
+        per_token_scale: Optional[torch.Tensor],
         num_experts: int,
         top_k: int,
         n_group: Optional[int],
@@ -2315,6 +2354,7 @@ def get_trtllm_moe_sm100_module():
             activation_type=ActivationType.Swiglu,
             weight_layout=WeightLayout.BlockMajorK,
             use_shuffled_weight=True,
+            num_experts=num_experts,
         )
 
         moe_inputs = MoEInputs(
@@ -2324,6 +2364,7 @@ def get_trtllm_moe_sm100_module():
             expert_weights=expert_weights,
             hidden_states=hidden_states,
             hidden_states_scale=None,
+            per_token_scale=None,
         )
         tuning_config = moe_runner._make_tuning_config(
             moe_inputs,
@@ -2457,7 +2498,7 @@ def _validate_routing_replay_out(
         raise ValueError("routing_replay_out must be contiguous (packed row-major)")
 
 
-@flashinfer_api
+@flashinfer_api(trace=trtllm_bf16_moe_trace)
 def trtllm_bf16_moe(
     routing_logits: torch.Tensor,
     routing_bias: Optional[torch.Tensor],
@@ -2512,6 +2553,9 @@ def trtllm_bf16_moe(
             - 2: DeepSeekV3 (Sigmoid -> RoutingBiasAdd -> Top2 in group -> Top4 groups -> Top8 experts)
             - 3: Llama4 (Top1 -> Sigmoid)
             - 4: RenormalizeNaive (Softmax -> TopK -> Renormalize)
+            - 6: SigmoidRenorm (Sigmoid -> TopK -> Renormalize)
+            - 7: MiniMax2 (Sigmoid + Bias -> TopK -> ScaledSumNormalize)
+            - 8: Sigmoid (Sigmoid -> TopK)
         use_shuffled_weight: Whether to use shuffled weight layout for optimization (default: True).
         weight_layout: Weight layout format (default: WeightLayout.BlockMajorK).
             - 0: MajorK - K-major layout [Mn, K]
@@ -2565,7 +2609,7 @@ def trtllm_bf16_moe(
         return result
 
 
-@flashinfer_api
+@flashinfer_api(trace=trtllm_bf16_routed_moe_trace)
 def trtllm_bf16_routed_moe(
     topk_ids: torch.Tensor,
     hidden_states: torch.Tensor,
@@ -2617,6 +2661,9 @@ def trtllm_bf16_routed_moe(
             - 2: DeepSeekV3 (Sigmoid -> RoutingBiasAdd -> Top2 in group -> Top4 groups -> Top8 experts)
             - 3: Llama4 (Top1 -> Sigmoid)
             - 4: RenormalizeNaive (Softmax -> TopK -> Renormalize)
+            - 6: SigmoidRenorm (Sigmoid -> TopK -> Renormalize)
+            - 7: MiniMax2 (Sigmoid + Bias -> TopK -> ScaledSumNormalize)
+            - 8: Sigmoid (Sigmoid -> TopK)
         use_shuffled_weight: Whether to use shuffled weight layout for optimization (default: True).
         weight_layout: Weight layout format (default: WeightLayout.BlockMajorK).
             - 0: MajorK - K-major layout [Mn, K]
@@ -2670,7 +2717,7 @@ def trtllm_bf16_routed_moe(
         return result
 
 
-@flashinfer_api
+@flashinfer_api(trace=trtllm_fp8_per_tensor_scale_moe_trace)
 def trtllm_fp8_per_tensor_scale_moe(
     routing_logits: torch.Tensor,
     routing_bias: Optional[torch.Tensor],
@@ -2771,7 +2818,7 @@ def trtllm_fp8_per_tensor_scale_moe(
         return result
 
 
-@flashinfer_api
+@flashinfer_api(trace=trtllm_fp8_block_scale_moe_trace_dispatch)
 def trtllm_fp8_block_scale_moe(
     routing_logits: torch.Tensor,
     routing_bias: Optional[torch.Tensor],
@@ -2892,7 +2939,7 @@ def trtllm_fp8_block_scale_moe(
         return result
 
 
-@flashinfer_api
+@flashinfer_api(trace=trtllm_fp8_block_scale_routed_moe_trace)
 def trtllm_fp8_block_scale_routed_moe(
     topk_ids: torch.Tensor,
     routing_bias: Optional[torch.Tensor],
@@ -3006,7 +3053,7 @@ def trtllm_fp8_block_scale_routed_moe(
         return result
 
 
-@flashinfer_api
+@flashinfer_api(trace=trtllm_fp4_block_scale_moe_trace_dispatch)
 def trtllm_fp4_block_scale_moe(
     routing_logits: torch.Tensor,
     routing_bias: Optional[torch.Tensor],
@@ -3036,6 +3083,7 @@ def trtllm_fp4_block_scale_moe(
     do_finalize: bool = True,
     enable_pdl: Optional[bool] = None,
     activation_type: int = ActivationType.Swiglu.value,
+    per_token_scale: Optional[torch.Tensor] = None,
     output: Optional[torch.Tensor] = None,
     tune_max_num_tokens: int = 8192,
     norm_topk_prob: bool = True,
@@ -3090,6 +3138,9 @@ def trtllm_fp4_block_scale_moe(
             - 2: DeepSeekV3 (Sigmoid -> RoutingBiasAdd -> Top2 in group -> Top4 groups -> Top8 experts)
             - 3: Llama4 (Top1 -> Sigmoid)
             - 4: RenormalizeNaive (Softmax -> TopK -> Renormalize)
+            - 6: SigmoidRenorm (Sigmoid -> TopK -> Renormalize)
+            - 7: MiniMax2 (Sigmoid + Bias -> TopK -> ScaledSumNormalize)
+            - 8: Sigmoid (Sigmoid -> TopK)
         do_finalize (bool): Whether to finalize the output (default: False)
         enable_pdl (Optional[bool]): Whether to enable Programmatic Dependent Launch (PDL). Auto-enabled for >= sm90.
         activation_type (int): Type of activation function (default: 3 - Swiglu)
@@ -3097,6 +3148,8 @@ def trtllm_fp4_block_scale_moe(
             - 4: Geglu
             - 6: Relu2
             - 7: Identity
+        per_token_scale (Optional[torch.Tensor]): shape [seq_len]
+            Tensor of per-token scaling factors. Dtype must be float32.
         tune_max_num_tokens(int): Maximum number of tokens for tuning. (default: 8192)
         output (Optional[torch.Tensor]): shape [seq_len, hidden_size]
             Optional inplace output tensor.
@@ -3124,6 +3177,7 @@ def trtllm_fp4_block_scale_moe(
         output1_scale_scalar,
         output1_scale_gate_scalar,
         output2_scale_scalar,
+        per_token_scale,
         num_experts,
         top_k,
         n_group,
@@ -3143,7 +3197,7 @@ def trtllm_fp4_block_scale_moe(
     )
 
 
-@flashinfer_api
+@flashinfer_api(trace=trtllm_fp4_block_scale_routed_moe_trace)
 def trtllm_fp4_block_scale_routed_moe(
     topk_ids: torch.Tensor,
     routing_bias: Optional[torch.Tensor],
@@ -3173,6 +3227,7 @@ def trtllm_fp4_block_scale_routed_moe(
     do_finalize: bool = True,
     enable_pdl: Optional[bool] = None,
     activation_type: int = ActivationType.Swiglu.value,
+    per_token_scale: Optional[torch.Tensor] = None,
     output: Optional[torch.Tensor] = None,
     tune_max_num_tokens: int = 8192,
 ) -> List[torch.Tensor]:
@@ -3227,12 +3282,17 @@ def trtllm_fp4_block_scale_routed_moe(
             - 2: DeepSeekV3 (Sigmoid -> RoutingBiasAdd -> Top2 in group -> Top4 groups -> Top8 experts)
             - 3: Llama4 (Top1 -> Sigmoid)
             - 4: RenormalizeNaive (Softmax -> TopK -> Renormalize)
+            - 6: SigmoidRenorm (Sigmoid -> TopK -> Renormalize)
+            - 7: MiniMax2 (Sigmoid + Bias -> TopK -> ScaledSumNormalize)
+            - 8: Sigmoid (Sigmoid -> TopK)
         do_finalize (bool): Whether to finalize the output (default: False)
         activation_type (int): Type of activation function (default: 3 - Swiglu)
             - 3: Swiglu
             - 4: Geglu
             - 6: Relu2
             - 7: Identity
+        per_token_scale (Optional[torch.Tensor]): shape [seq_len]
+            Tensor of per-token scaling factors. Dtype must be float32.
         tune_max_num_tokens(int): Maximum number of tokens for tuning. (default: 8192)
         output (Optional[torch.Tensor]): shape [seq_len, hidden_size]
             Optional inplace output tensor.
@@ -3260,6 +3320,7 @@ def trtllm_fp4_block_scale_routed_moe(
         output1_scale_scalar,
         output1_scale_gate_scalar,
         output2_scale_scalar,
+        per_token_scale,
         num_experts,
         top_k,
         n_group,
@@ -3278,7 +3339,7 @@ def trtllm_fp4_block_scale_routed_moe(
     )
 
 
-@flashinfer_api
+@flashinfer_api(trace=trtllm_mxint4_block_scale_moe_trace)
 def trtllm_mxint4_block_scale_moe(
     routing_logits: torch.Tensor,
     routing_bias: Optional[torch.Tensor],
@@ -3343,6 +3404,9 @@ def trtllm_mxint4_block_scale_moe(
             - 2: DeepSeekV3 (Sigmoid -> RoutingBiasAdd -> Top2 in group -> Top4 groups -> Top8 experts)
             - 3: Llama4 (Top1 -> Sigmoid)
             - 4: RenormalizeNaive (Softmax -> TopK -> Renormalize)
+            - 6: SigmoidRenorm (Sigmoid -> TopK -> Renormalize)
+            - 7: MiniMax2 (Sigmoid + Bias -> TopK -> ScaledSumNormalize)
+            - 8: Sigmoid (Sigmoid -> TopK)
         do_finalize (bool): Whether to finalize the output (default: False)
         enable_pdl (Optional[bool]): Whether to enable Programmatic Dependent Launch (PDL). Auto-enabled for >= sm90.
         tune_max_num_tokens(int): Maximum number of tokens for tuning. (default: 8192)

@@ -19,6 +19,8 @@
 set -e
 set -u
 
+pip3 install --upgrade "setuptools>=77" "pip>=24"
+
 # Accept CUDA version as parameter (e.g., cu126, cu128, cu129)
 CUDA_VERSION=${1:-cu128}
 
