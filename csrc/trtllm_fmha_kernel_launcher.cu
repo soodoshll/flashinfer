@@ -94,9 +94,9 @@ void trtllm_paged_attention_launcher(
     const float* bmm1_scale_log2_ptr, const float* bmm2_scale_ptr, double o_sf_scale,
     int64_t o_sf_vec_size, int64_t o_sf_start_index, int64_t window_left, int64_t sum_seq_q,
     int64_t sparse_mla_top_k, float skip_softmax_threshold_scale_factor, bool skips_softmax,
-    bool use_fp16_softmax, bool uses_spcompress, bool uses_shared_paged_kv_idx, int64_t sm_count, bool enable_pdl, int64_t workspace_size,
-    int64_t k_sf_stride_heads, int64_t k_sf_stride_batch, int64_t v_sf_stride_heads,
-    int64_t v_sf_stride_batch, bool is_causal, cudaStream_t stream) {
+    bool use_fp16_softmax, bool uses_spcompress, bool uses_shared_paged_kv_idx, int64_t sm_count,
+    bool enable_pdl, int64_t workspace_size, int64_t k_sf_stride_heads, int64_t k_sf_stride_batch,
+    int64_t v_sf_stride_heads, int64_t v_sf_stride_batch, bool is_causal, cudaStream_t stream) {
   if (num_qo_heads % num_kv_heads != 0) {
     std::ostringstream err_msg;
     err_msg << "num_qo_heads must be a multiple of num_kv_heads, got num_kv_heads: " << num_kv_heads
@@ -382,8 +382,9 @@ void trtllm_paged_attention_decode(
       max_num_blocks_per_seq, bmm1_scale_value, bmm2_scale_value, bmm1_scale_log2_ptr,
       bmm2_scale_ptr, o_sf_scale, o_sf_vec_size, o_sf_start_index, window_left, sum_seq_q,
       sparse_mla_top_k, skip_softmax_threshold_scale_factor_value, skips_softmax,
-      use_fp16_softmax_value, uses_spcompress_value, uses_shared_paged_kv_idx_value, sm_count, enable_pdl, workspace_size, k_sf_stride_heads,
-      k_sf_stride_batch, v_sf_stride_heads, v_sf_stride_batch, true, stream);
+      use_fp16_softmax_value, uses_spcompress_value, uses_shared_paged_kv_idx_value, sm_count,
+      enable_pdl, workspace_size, k_sf_stride_heads, k_sf_stride_batch, v_sf_stride_heads,
+      v_sf_stride_batch, true, stream);
 }
 
 void trtllm_paged_attention_context(
@@ -513,8 +514,9 @@ void trtllm_paged_attention_context(
       kv_stride_heads, kv_stride_batch, max_num_blocks_per_seq, bmm1_scale_value, bmm2_scale_value,
       bmm1_scale_log2_ptr, bmm2_scale_ptr, o_sf_scale, o_sf_vec_size, o_sf_start_index, window_left,
       sum_seq_q, /*sparse_mla_top_k=*/0, skip_softmax_threshold_scale_factor_value, skips_softmax,
-      use_fp16_softmax_value, uses_spcompress_value, uses_shared_paged_kv_idx_value, sm_count, enable_pdl, workspace_size, k_sf_stride_heads,
-      k_sf_stride_batch, v_sf_stride_heads, v_sf_stride_batch, is_causal, stream);
+      use_fp16_softmax_value, uses_spcompress_value, uses_shared_paged_kv_idx_value, sm_count,
+      enable_pdl, workspace_size, k_sf_stride_heads, k_sf_stride_batch, v_sf_stride_heads,
+      v_sf_stride_batch, is_causal, stream);
 }
 
 void trtllm_ragged_attention_launcher(
@@ -528,10 +530,9 @@ void trtllm_ragged_attention_launcher(
     int64_t k_stride_keys_values, int64_t k_stride_heads, int64_t k_stride_batch,
     int64_t v_stride_keys_values, int64_t v_stride_heads, int64_t v_stride_batch,
     float skip_softmax_threshold_scale_factor, bool skips_softmax, bool use_fp16_softmax,
-    bool uses_spcompress, const float* sage_attn_sfs_q,
-    const float* sage_attn_sfs_k, const float* sage_attn_sfs_p, const float* sage_attn_sfs_v,
-    int num_elts_sage_q, int num_elts_sage_k, int num_elts_sage_p, int num_elts_sage_v,
-    cudaStream_t stream) {
+    bool uses_spcompress, const float* sage_attn_sfs_q, const float* sage_attn_sfs_k,
+    const float* sage_attn_sfs_p, const float* sage_attn_sfs_v, int num_elts_sage_q,
+    int num_elts_sage_k, int num_elts_sage_p, int num_elts_sage_v, cudaStream_t stream) {
   if (num_qo_heads % num_kv_heads != 0) {
     std::ostringstream err_msg;
     err_msg << "num_qo_heads must be a multiple of num_kv_heads, got num_kv_heads: " << num_kv_heads
@@ -626,17 +627,16 @@ void trtllm_ragged_attention_launcher(
   fmha_runner->run(runner_params);
 }
 
-void trtllm_ragged_attention(TensorView out, TensorView query, TensorView key, TensorView value,
-                             TensorView workspace_buffer, TensorView seq_lens, int64_t max_q_len,
-                             int64_t max_kv_len, Variant<double, ffi::Tensor> bmm1_scale,
-                             Variant<double, ffi::Tensor> bmm2_scale, double o_sf_scale,
-                             int64_t batch_size, int64_t window_left, TensorView cum_seq_lens_q,
-                             TensorView cum_seq_lens_kv, int64_t sm_count, bool enable_pdl,
-                             bool is_causal, int64_t workspace_size,
-                             Optional<TensorView> attention_sinks,
-                             Optional<float> skip_softmax_threshold_scale_factor,
-                             Optional<TensorView> lse, Optional<bool> use_fp16_softmax,
-                             Optional<bool> uses_spcompress, Optional<TensorView> sage_attn_sfs_q, Optional<TensorView> sage_attn_sfs_k,
+void trtllm_ragged_attention(
+    TensorView out, TensorView query, TensorView key, TensorView value, TensorView workspace_buffer,
+    TensorView seq_lens, int64_t max_q_len, int64_t max_kv_len,
+    Variant<double, ffi::Tensor> bmm1_scale, Variant<double, ffi::Tensor> bmm2_scale,
+    double o_sf_scale, int64_t batch_size, int64_t window_left, TensorView cum_seq_lens_q,
+    TensorView cum_seq_lens_kv, int64_t sm_count, bool enable_pdl, bool is_causal,
+    int64_t workspace_size, Optional<TensorView> attention_sinks,
+    Optional<float> skip_softmax_threshold_scale_factor, Optional<TensorView> lse,
+    Optional<bool> use_fp16_softmax, Optional<bool> uses_spcompress,
+    Optional<TensorView> sage_attn_sfs_q, Optional<TensorView> sage_attn_sfs_k,
     Optional<TensorView> sage_attn_sfs_p, Optional<TensorView> sage_attn_sfs_v,
     int64_t num_elts_per_sage_attn_blk_q, int64_t num_elts_per_sage_attn_blk_k,
     int64_t num_elts_per_sage_attn_blk_p, int64_t num_elts_per_sage_attn_blk_v) {
@@ -725,9 +725,8 @@ void trtllm_ragged_attention(TensorView out, TensorView query, TensorView key, T
       sm_count, enable_pdl, is_causal, k_stride_keys_values, k_stride_heads, k_stride_batch,
       v_stride_keys_values, v_stride_heads, v_stride_batch,
       skip_softmax_threshold_scale_factor_value, skips_softmax, use_fp16_softmax_value,
-      uses_spcompress_value, workspace_size, sage_attn_sfs_q_ptr,
-      sage_attn_sfs_k_ptr, sage_attn_sfs_p_ptr, sage_attn_sfs_v_ptr,
-      static_cast<int>(num_elts_per_sage_attn_blk_q),
+      uses_spcompress_value, workspace_size, sage_attn_sfs_q_ptr, sage_attn_sfs_k_ptr,
+      sage_attn_sfs_p_ptr, sage_attn_sfs_v_ptr, static_cast<int>(num_elts_per_sage_attn_blk_q),
       static_cast<int>(num_elts_per_sage_attn_blk_k),
       static_cast<int>(num_elts_per_sage_attn_blk_p),
       static_cast<int>(num_elts_per_sage_attn_blk_v), stream);

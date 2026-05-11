@@ -2416,7 +2416,7 @@ def test_trtllm_gen_prefill(
             lse_ref,
             atol=lse_atol,
             rtol=lse_rtol,
-    )
+        )
 
     # check if the first 8192 * 256 * 4 bytes of workspace_buffer is zero
     # note(Yingyi): the first 8192 * 256 * 4 bytes of workspace_buffer is the counter workspace, size might change in the future
