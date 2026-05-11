@@ -73,11 +73,8 @@ from .blockscaled_contiguous_grouped_gemm_finalize_fusion import (
 )
 from .tuner import (
     CuteDslFusedMoENvfp4Runner,
-<<<<<<< HEAD
     _get_arch_tactics,
-=======
     VALID_TILE_SIZES,
->>>>>>> origin/main
 )
 
 
@@ -777,13 +774,8 @@ def _cute_dsl_fused_moe_nvfp4_impl(
     )
 
 
-<<<<<<< HEAD
 @supported_compute_capability([100, 103, 107])
-@flashinfer_api
-=======
-@supported_compute_capability([100, 103])
 @flashinfer_api(trace=cute_dsl_fused_moe_nvfp4_trace)
->>>>>>> origin/main
 def cute_dsl_fused_moe_nvfp4(
     x: torch.Tensor,
     x_sf: torch.Tensor,
