@@ -522,17 +522,18 @@ void trtllm_paged_attention_context(
 void trtllm_ragged_attention_launcher(
     void* out, void* query, void* key, void* value, void* workspace_buffer, int* seq_lens,
     int* cum_seq_lens_q, int* cum_seq_lens_kv, float* attention_sinks, float* lse,
-    Data_type q_data_type, Data_type kv_data_type, Data_type o_data_type, int64_t max_q_len,
-    int64_t max_kv_len, int64_t num_qo_heads, int64_t num_kv_heads, int64_t head_dim_qk,
-    int64_t head_dim_v, int64_t sum_seq_q, int64_t sum_seq_kv, double bmm1_scale, double bmm2_scale,
-    const float* bmm1_scale_log2_ptr, const float* bmm2_scale_ptr, double o_sf_scale,
-    int64_t batch_size, int64_t window_left, int64_t sm_count, bool enable_pdl, bool is_causal,
-    int64_t k_stride_keys_values, int64_t k_stride_heads, int64_t k_stride_batch,
-    int64_t v_stride_keys_values, int64_t v_stride_heads, int64_t v_stride_batch,
-    float skip_softmax_threshold_scale_factor, bool skips_softmax, bool use_fp16_softmax,
-    bool uses_spcompress, const float* sage_attn_sfs_q, const float* sage_attn_sfs_k,
-    const float* sage_attn_sfs_p, const float* sage_attn_sfs_v, int num_elts_sage_q,
-    int num_elts_sage_k, int num_elts_sage_p, int num_elts_sage_v, cudaStream_t stream) {
+    Data_type q_data_type, Data_type k_data_type, Data_type v_data_type, Data_type o_data_type,
+    int64_t max_q_len, int64_t max_kv_len, int64_t num_qo_heads, int64_t num_kv_heads,
+    int64_t head_dim_qk, int64_t head_dim_v, int64_t sum_seq_q, int64_t sum_seq_kv,
+    double bmm1_scale, double bmm2_scale, const float* bmm1_scale_log2_ptr,
+    const float* bmm2_scale_ptr, double o_sf_scale, int64_t batch_size, int64_t window_left,
+    int64_t sm_count, bool enable_pdl, bool is_causal, int64_t k_stride_keys_values,
+    int64_t k_stride_heads, int64_t k_stride_batch, int64_t v_stride_keys_values,
+    int64_t v_stride_heads, int64_t v_stride_batch, float skip_softmax_threshold_scale_factor,
+    bool skips_softmax, bool use_fp16_softmax, bool uses_spcompress, int64_t workspace_size,
+    const float* sage_attn_sfs_q, const float* sage_attn_sfs_k, const float* sage_attn_sfs_p,
+    const float* sage_attn_sfs_v, int num_elts_sage_q, int num_elts_sage_k, int num_elts_sage_p,
+    int num_elts_sage_v, cudaStream_t stream) {
   if (num_qo_heads % num_kv_heads != 0) {
     std::ostringstream err_msg;
     err_msg << "num_qo_heads must be a multiple of num_kv_heads, got num_kv_heads: " << num_kv_heads
@@ -719,7 +720,8 @@ void trtllm_ragged_attention(
       out.data_ptr(), query.data_ptr(), key.data_ptr(), value.data_ptr(),
       workspace_buffer.data_ptr(), static_cast<int*>(seq_lens.data_ptr()),
       static_cast<int*>(cum_seq_lens_q.data_ptr()), static_cast<int*>(cum_seq_lens_kv.data_ptr()),
-      attention_sinks_ptr, lse_ptr, q_data_type, kv_data_type, o_data_type, max_q_len, max_kv_len,
+      attention_sinks_ptr, lse_ptr, q_data_type, k_data_type, v_data_type, o_data_type, max_q_len,
+      max_kv_len,
       num_qo_heads, num_kv_heads, head_dim_qk, head_dim_v, sum_seq_q, sum_seq_kv, bmm1_scale_value,
       bmm2_scale_value, bmm1_scale_log2_ptr, bmm2_scale_ptr, o_sf_scale, batch_size, window_left,
       sm_count, enable_pdl, is_causal, k_stride_keys_values, k_stride_heads, k_stride_batch,
