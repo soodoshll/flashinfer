@@ -48,7 +48,10 @@ from ..fused_moe.utils import (
     get_hybrid_num_tokens_buckets,
     map_to_hybrid_bucket_uncapped,
 )
-from .kernels.utils import _select_sm100_mm_fp4_cute_dsl_tactic
+from .kernels.utils import (
+    _select_sm100_bmm_fp8_cute_dsl_tactic,
+    _select_sm100_mm_fp4_cute_dsl_tactic,
+)
 from ..utils import (
     get_device_sm_count,
     get_native_fp4_dtype,
@@ -1358,12 +1361,46 @@ def _cute_dsl_fp8_gemm_runner(arch: Literal["sm100", "sm107"]):
         ) -> torch.Tensor:
             """Execute the kernel with the specified tactic (config index)."""
             from .kernels.bmm_fp8_wrapper import bmm_fp8_cute_dsl
+            from ..cute_dsl.utils import torch_dtype_to_cutlass
 
             a, b, scale_a, scale_b, out, workspace_buffer = inputs
 
-            # Use first config as fallback if tactic is -1 or invalid
+            # When the autotuner has no cached pick (non-tuning mode), pick a
+            # config index analytically
             if tactic < 0 or tactic >= len(AUTOTUNE_CONFIGS):
-                tactic = 0
+                batch, m, k = a.shape
+                _, _, n = out.shape
+                try:
+                    ab_dtype = torch_dtype_to_cutlass(a.dtype)
+                    c_dtype = torch_dtype_to_cutlass(out.dtype)
+                except TypeError:
+                    tactic = 0
+                else:
+                    a_strides = a.stride()
+                    if a_strides[1] == 1:
+                        a_major = "m"
+                    elif a_strides[2] == 1:
+                        a_major = "k"
+                    else:
+                        a_major = "k" if a_strides[1] >= a_strides[2] else "m"
+                    b_strides = b.stride()
+                    if b_strides[1] == 1:
+                        b_major = "k"
+                    elif b_strides[2] == 1:
+                        b_major = "n"
+                    else:
+                        b_major = "n" if b_strides[1] >= b_strides[2] else "k"
+                    c_major = "n"
+                    if arch == "sm100":
+                        sm_count = get_device_sm_count(a.device)
+                        tactic = _select_sm100_bmm_fp8_cute_dsl_tactic(
+                            m, n, k, batch,
+                            ab_dtype, c_dtype,
+                            a_major, b_major, c_major,
+                            sm_count,
+                        )
+                    else:
+                        tactic = 0
 
             # CuTe-DSL kernel handles the computation with scale fused into epilogue.
             # The kernel natively supports Float16, BFloat16, and Float32 output.
