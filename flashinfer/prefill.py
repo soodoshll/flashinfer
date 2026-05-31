@@ -244,6 +244,7 @@ def get_trtllm_gen_prefill_module():
         use_fp16_softmax: Optional[bool] = None,
         uses_spcompress: Optional[bool] = None,
         is_causal: bool = True,
+        lse: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         sm_count = get_device_sm_count(query.device)
         if out is None:
@@ -253,6 +254,15 @@ def get_trtllm_gen_prefill_module():
             bmm1_scale = bmm1_scale * log2e
         if isinstance(bmm2_scale, torch.Tensor):
             assert bmm2_scale.dtype == torch.float32
+        if lse is not None:
+            check_shape_dtype_device(
+                lse, (query.size(0), query.size(1)), torch.float32, query.device, "lse"
+            )
+            lse_stride_tokens = lse.stride(0)
+            lse_stride_heads = lse.stride(1)
+        else:
+            lse_stride_tokens = 0
+            lse_stride_heads = 0
         op.trtllm_paged_attention_context(
             out,
             None,  # fp4 output not supported in wrapper api yet.
@@ -284,6 +294,9 @@ def get_trtllm_gen_prefill_module():
             use_fp16_softmax,
             uses_spcompress,
             is_causal,
+            lse,
+            lse_stride_tokens,
+            lse_stride_heads,
         )
         return out
 
@@ -671,7 +684,6 @@ def get_batch_prefill_module(backend, *args):
         uses_spcompress: Optional[bool] = None,
     ) -> None:
         if backend == "trtllm-gen":
-            assert maybe_lse is None
             assert num_qo_heads is not None
             assert num_kv_heads is not None
             assert block_tables is not None
@@ -709,6 +721,7 @@ def get_batch_prefill_module(backend, *args):
                 use_fp16_softmax=use_fp16_softmax,
                 uses_spcompress=uses_spcompress,
                 is_causal=mask_mode != MaskMode.NON_CAUSAL.value,
+                lse=maybe_lse,
             )
         elif backend == "fa2":
             assert not is_float8(q)
@@ -4054,7 +4067,11 @@ def trtllm_batch_context_with_kv_cache(
     use_fp16_softmax: Optional[bool] = None,
     uses_spcompress: Optional[bool] = None,
     causal: bool = True,
-) -> Union[torch.Tensor, FP4Tensor]:
+    lse: Optional[torch.Tensor] = None,
+    return_lse: bool = False,
+) -> Union[
+    torch.Tensor, FP4Tensor, Tuple[Union[torch.Tensor, FP4Tensor], torch.Tensor]
+]:
     """
     Parameters
     ----------
@@ -4161,13 +4178,22 @@ def trtllm_batch_context_with_kv_cache(
         Select the ``…Spcomp…`` cubin variant (sparse compression).
         Currently only shipped for FP8 Q kernels.
     causal : bool = True
-        Whether to apply a causal mask. This trailing parameter preserves existing positional
-        callers. Set to ``False`` to request dense / bidirectional attention. For the TRTLLM-gen
-        paged context path, non-causal currently requires ``window_left == -1``.
+        Whether to apply a causal mask. Set to ``False`` to request dense / bidirectional
+        attention. For the TRTLLM-gen paged context path, non-causal currently requires
+        ``window_left == -1``.
+    lse : Optional[torch.Tensor] = None
+        Optional pre-allocated buffer for Log-Sum-Exp values. Must have shape
+        ``[num_tokens, num_qo_heads]`` with dtype ``torch.float32``.
+        If ``return_lse`` is True and this is None, a buffer will be allocated.
+    return_lse : bool = False
+        Whether to return Log-Sum-Exp values. When True, returns ``(out, lse)``.
     Returns
     -------
     out: Union[torch.Tensor, FP4Tensor]
         output torch.Tensor or FP4Tensor.
+    lse : torch.Tensor, optional
+        Only returned when ``return_lse`` is True. Shape
+        ``[num_tokens, num_qo_heads]`` with dtype ``torch.float32``.
     """
 
     if enable_pdl is None:
@@ -4298,6 +4324,21 @@ def trtllm_batch_context_with_kv_cache(
         assert bmm2_scale.dtype == torch.float32
     _check_block_tables_shape(block_tables, uses_shared_paged_kv_idx)
     workspace_size = workspace_buffer.numel() * workspace_buffer.element_size()
+
+    num_qo_heads = query.size(1)
+    lse_shape = (query.size(0), num_qo_heads)
+    if lse is not None:
+        check_shape_dtype_device(lse, lse_shape, torch.float32, query.device, "lse")
+        lse_stride_tokens = lse.stride(0)
+        lse_stride_heads = lse.stride(1)
+    elif return_lse:
+        lse = torch.empty(lse_shape, dtype=torch.float32, device=query.device)
+        lse_stride_tokens = lse.stride(0)
+        lse_stride_heads = lse.stride(1)
+    else:
+        lse_stride_tokens = 0
+        lse_stride_heads = 0
+
     run_func(
         out,
         out_scale_factor,
@@ -4329,12 +4370,18 @@ def trtllm_batch_context_with_kv_cache(
         use_fp16_softmax,
         uses_spcompress,
         causal,
+        lse,
+        lse_stride_tokens,
+        lse_stride_heads,
     )
-    return (
+    result_out = (
         out
         if out_dtype != "nvfp4"
         else FP4Tensor(out, out_scale_factor, o_sf_start_index, query.shape)
     )
+    if return_lse:
+        return result_out, lse
+    return result_out
 
 
 @functools.cache
@@ -4666,16 +4713,6 @@ def trtllm_fmha_v2_prefill(
                 "FP8 (e4m3) is not yet supported for FMHAv2 on SM120 (Blackwell). "
                 "Use fp16 or bf16 instead."
             )
-        if uses_sliding_window and input_layout in ("PACKED_QKV", "CONTIGUOUS_Q_KV"):
-            _num_kv_heads = (
-                num_qo_heads if input_layout == "PACKED_QKV" else k_cache.shape[2]
-            )
-            if batch_size == 16 and _num_kv_heads == 4 and head_dim_v == 256:
-                raise ValueError(
-                    "FP8 (e4m3) sliding window attention with batch_size=16, "
-                    "num_kv_heads=4, head_dim=256 is not supported for "
-                    f"{input_layout} layout due to a known issue."
-                )
     # Always pass 1.0: the C++ auto-detect (scale_softmax == 0.0) handles FP16/INT8/E4M3
     # but has no branch for BF16, where 0.0 would zero out the softmax output.
     scale_softmax = 1.0

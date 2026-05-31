@@ -715,7 +715,7 @@ class Sm103BlockScaledPersistentDenseGemmKernel:
             )
         # Tensor memory dealloc barrier init
         tmem = utils.TmemAllocator(
-            storage.tmem_holding_buf,
+            storage.tmem_holding_buf.ptr,
             barrier_for_retrieve=tmem_alloc_barrier,
             allocator_warp_id=self.epilogue_warp_id[0],
             is_two_cta=use_2cta_instrs,
@@ -1836,7 +1836,7 @@ class Sm103BlockScaledPersistentDenseGemmKernel:
         """
 
         sf_vec_size: int
-        major_mode: OperandMajorMode = field(default_factory=lambda: OperandMajorMode.K)
+        major_mode: OperandMajorMode = OperandMajorMode.K
         _layout: cute.Layout = field(init=False, repr=False)
 
         def __post_init__(self) -> None:
