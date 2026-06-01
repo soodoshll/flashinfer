@@ -2267,6 +2267,7 @@ class TrtllmGenDecodeModule:
             lse,
             lse_stride_tokens,
             lse_stride_heads,
+            None,  # use_fp16_softmax
         )
         return out
 
@@ -2834,6 +2835,7 @@ def trtllm_batch_decode_with_kv_cache(
             lse,
             lse_stride_tokens,
             lse_stride_heads,
+            None,  # use_fp16_softmax
         )
 
         result_out = (
