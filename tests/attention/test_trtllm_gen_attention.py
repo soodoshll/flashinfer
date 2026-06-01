@@ -1415,6 +1415,7 @@ def test_trtllm_batch_prefill_cubin_variants(
         page_size,
         num_kv_heads,
         head_grp_size,
+        True,
         window_left,
         q_dtype,
         o_dtype,
