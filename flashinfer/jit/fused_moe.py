@@ -313,6 +313,11 @@ def gen_trtllm_gen_fused_moe_sm100_module() -> JitSpec:
         extra_cuda_cflags=[
             "-DTLLM_GEN_EXPORT_INTERFACE",
             "-DTLLM_GEN_EXPORT_FLASHINFER",
+            # The pinned bmm cubin pack ships flashinferMetaInfo.h that initializes
+            # Rubin-only BatchedGemmOptions fields unconditionally, so the macro
+            # must be defined for the headers to match. Selecting the correct cubin
+            # per device SM happens at runtime in trtllm_batched_gemm_runner.cu.
+            "-DTLLM_RUBIN_FEATURES",
             "-DTLLM_ENABLE_CUDA",
             "-DENABLE_BF16",
             "-DENABLE_FP8",
