@@ -2431,7 +2431,7 @@ class TestPreallocGateUnderTuning:
 
 
 @cute_dsl_available
-@sm100_required
+@sm10x_required
 class TestMoeOutputMemsetInplace:
     """Correctness + stream-handling tests for the dense memset wrapper."""
 
