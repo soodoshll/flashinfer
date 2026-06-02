@@ -128,12 +128,24 @@ TrtllmGenBatchedGemmRunner::TrtllmGenBatchedGemmRunner(
       if ((int64_t)options.mEltwiseActType != (int64_t)mOptions.eltwiseActType) {
         continue;
       }
-      // if patchF2fp is enabled, sm100f cubins cannot be used for sm103
-      if (options.mPatchF2fp && sm_version == 103) {
-        if (config.mSm != tg::CudaArch::Sm103a) continue;
-      }
-      if (options.mPatchF2fp && sm_version == 100) {
-        if (config.mSm != tg::CudaArch::Sm100a && config.mSm != tg::CudaArch::Sm100f) continue;
+      // Restrict configs to those matching the running device's SM. The cubin
+      // pack ships Sm100f/Sm103a/Sm107a kernels in the same metainfo; with
+      // TLLM_RUBIN_FEATURES enabled the host launch path emits Rubin-mode
+      // sync/scheduling that Blackwell-only SASS can't honor (kernels stall),
+      // so allowing cross-arch configs through here causes the autotuner to
+      // hang on tactics whose mSm doesn't match the device.
+      switch (sm_version) {
+        case 100:
+          if (config.mSm != tg::CudaArch::Sm100a && config.mSm != tg::CudaArch::Sm100f) continue;
+          break;
+        case 103:
+          if (config.mSm != tg::CudaArch::Sm103a) continue;
+          break;
+        case 107:
+          if (config.mSm != tg::CudaArch::Sm107a) continue;
+          break;
+        default:
+          break;
       }
       if (mOptions.transposeMmaOutput && options.mEpilogueTileM == mOptions.epilogueTileM) {
         // Skip cubins with clusterZ > 1 due to correctness issues described in

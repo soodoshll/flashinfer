@@ -709,6 +709,11 @@ def gen_trtllm_gen_gemm_module() -> JitSpec:
         extra_cuda_cflags=[
             "-DTLLM_GEN_EXPORT_INTERFACE",
             "-DTLLM_GEN_EXPORT_FLASHINFER",
+            # The pinned gemm cubin pack ships flashinferMetaInfo.h that initializes
+            # Rubin-only GemmOptions fields unconditionally, so the macro must be
+            # defined for the headers to match. Selecting the correct cubin per
+            # device SM happens at runtime in trtllm_gemm_runner.cu.
+            "-DTLLM_RUBIN_FEATURES",
             "-DTLLM_ENABLE_CUDA",
             f'-DTLLM_GEN_GEMM_CUBIN_PATH=\\"{ArtifactPath.TRTLLM_GEN_GEMM}\\"',
         ]
@@ -883,6 +888,11 @@ def gen_trtllm_low_latency_gemm_module() -> JitSpec:
         extra_cuda_cflags=[
             "-DTLLM_GEN_EXPORT_INTERFACE",
             "-DTLLM_GEN_EXPORT_FLASHINFER",
+            # The pinned gemm cubin pack ships flashinferMetaInfo.h that initializes
+            # Rubin-only GemmOptions fields unconditionally, so the macro must be
+            # defined for the headers to match. Selecting the correct cubin per
+            # device SM happens at runtime in trtllm_low_latency_gemm_runner.cu.
+            "-DTLLM_RUBIN_FEATURES",
             "-DTLLM_ENABLE_CUDA",
             f'-DTLLM_GEN_GEMM_CUBIN_PATH=\\"{ArtifactPath.TRTLLM_GEN_GEMM}\\"',
         ]
