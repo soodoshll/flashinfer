@@ -892,6 +892,7 @@ class Sm107BlockScaledPersistentDenseGemmKernel(
             self.cta_tile_shape_mnk,
             self.cluster_shape_mn,
             max_active_clusters,
+            self.is_swap_ab,
         )
 
         self.buffer_align_bytes = 1024
