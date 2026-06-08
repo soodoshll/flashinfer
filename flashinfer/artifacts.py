@@ -164,7 +164,7 @@ class CheckSumHash:
     )
     DEEPGEMM: str = "1a2a166839042dbd2a57f48051c82cd1ad032815927c753db269a4ed10d0ffbf"
     TRTLLM_GEN_GEMM: str = (
-        "ed41fb7d4d217e176bef6ddc19cc61a70f540c02aa1811c8a080bfb75f7d2d2a"
+        "d86f6cbea5cbd9bfde759fda8ec50df30866a1021a6db29a98394dde4c92afd4"
     )
     # SHA256 of the checksums.txt manifest file per cpu-arch/sm-arch,
     # NOT hashes of individual kernel .so files.
