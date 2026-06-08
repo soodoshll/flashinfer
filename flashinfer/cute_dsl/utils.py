@@ -16,6 +16,7 @@ limitations under the License.
 
 import ctypes
 import functools
+import importlib.util
 import warnings
 from typing import Union, Tuple
 
@@ -34,19 +35,24 @@ def ceil_div(a: int, b: int) -> int:
 
 
 def is_cute_dsl_available() -> bool:
-    """Check if CuTe-DSL is available.
+    r"""Return ``True`` when the optional CuTe DSL stack is importable.
 
-    Since this module has top-level imports from cutlass.cute, if we've
-    reached this point, CuTe-DSL is available. The function tries actual
-    imports as a fallback for robustness.
+    Probes for ``cutlass`` and ``cutlass.cute`` via :func:`importlib.util.find_spec`.
+    Used by higher-level wrappers to decide whether to dispatch to a CuTe-DSL
+    backend (e.g. :func:`flashinfer.quantization.mxfp4_quantize`,
+    :class:`flashinfer.cute_dsl.attention.wrappers.BatchDecodeCuteDSLWrapper`)
+    or fall back to a plain-CUDA implementation.
+
+    Returns
+    -------
+    bool
+        ``True`` if both ``cutlass`` and ``cutlass.cute`` are importable in the
+        current Python environment.
     """
-    try:
-        import cutlass
-        import cutlass.cute  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
+    return (
+        importlib.util.find_spec("cutlass") is not None
+        and importlib.util.find_spec("cutlass.cute") is not None
+    )
 
 
 def get_cutlass_dtype(dtype: str) -> cutlass.dtype:
