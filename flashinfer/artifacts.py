@@ -144,7 +144,7 @@ class ArtifactPath:
     )
     CUDNN_SDPA: str = "a72d85b019dc125b9f711300cb989430f762f5a6/fmha/cudnn/"
     # For DEEPGEMM, we also need to update KernelMap.KERNEL_MAP_HASH in flashinfer/deep_gemm.py
-    DEEPGEMM: str = "a72d85b019dc125b9f711300cb989430f762f5a6/deep-gemm/"
+    DEEPGEMM: str = "0cda165ac08d98a71c3eb8495c3604e59274d515/deep-gemm/"
     DSL_FMHA: str = "801e770219613fbf088bc074c414732b26cc550d/fmha/cute-dsl/"
     DSL_FMHA_ARCHS: tuple[str, ...] = ("sm_100a", "sm_103a", "sm_110a")
 
@@ -162,7 +162,7 @@ class CheckSumHash:
     TRTLLM_GEN_BMM: str = (
         "d2b42b8247b85fc0cbe7b0d4372944cfefcf25f12c4f6646a2913da7f5c36aaf"
     )
-    DEEPGEMM: str = "1a2a166839042dbd2a57f48051c82cd1ad032815927c753db269a4ed10d0ffbf"
+    DEEPGEMM: str = "55ead31e0ec32d7c33ef530e22c0523fcc67573d85f388fb496cc76193c7fa8c"
     TRTLLM_GEN_GEMM: str = (
         "d86f6cbea5cbd9bfde759fda8ec50df30866a1021a6db29a98394dde4c92afd4"
     )
