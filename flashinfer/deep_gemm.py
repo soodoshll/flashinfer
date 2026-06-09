@@ -1601,7 +1601,7 @@ def m_grouped_fp8_gemm_nt_masked(
 
 class KernelMap:
     # Hash for kernel_map.json, updated when deepgemm cubins are republished
-    KERNEL_MAP_HASH = "f161e031826adb8c4f0d31ddbd2ed77e4909e4e43cdfc9728918162a62fcccfb"
+    KERNEL_MAP_HASH = "4d5a11d5c408f459eb45510b3aed8b9df246fdf217c41362b9aa68f6b62091af"
 
     def __init__(self):
         self.indice = None
