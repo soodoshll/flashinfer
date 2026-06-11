@@ -104,7 +104,7 @@ def _mm_M1_16_K7168_N128_shape_checks(mat_a, mat_b, out, launch_with_pdl):
 
 
 # TODO: other compute capabilities may be supported but are untested
-@supported_compute_capability([100, 103])
+@supported_compute_capability([100, 103, 107])
 def _mm_M1_16_K6144_N256_shape_checks(mat_a, mat_b, out, launch_with_pdl):
     return _router_gemm_shape_checks(
         mat_a,
