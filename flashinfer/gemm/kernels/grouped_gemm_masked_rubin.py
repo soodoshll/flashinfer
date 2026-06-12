@@ -1702,7 +1702,6 @@ class Sm107BlockScaledPersistentDenseGemmKernel(
             c_producer_group = pipeline.CooperativeGroup(
                 pipeline.Agent.Thread,
                 self.threads_per_warp * len(self.epilog_warp_id),
-                self.threads_per_warp * len(self.epilog_warp_id),
             )
             c_pipeline = pipeline.PipelineTmaStore.create(
                 num_stages=self.num_c_stage,
