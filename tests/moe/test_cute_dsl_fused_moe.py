@@ -46,6 +46,11 @@ def is_sm10x():
     return props.major == 10
 
 
+# Back-compat alias: main's unified-MoE tests import ``is_sm100_family``; feat_sm107
+# renamed it to ``is_sm10x`` (Blackwell SM100/103 + Rubin SM107). Same check (major == 10).
+is_sm100_family = is_sm10x
+
+
 # Skip decorators
 cute_dsl_available = pytest.mark.skipif(
     not is_cute_dsl_available(), reason="CuteDSL not available"
