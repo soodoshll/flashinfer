@@ -118,8 +118,7 @@ class TrtllmGenGemmRunner {
     mPassingConfigIndices.clear();
 
     for (size_t i = 0; i < gemm.getNumGemmConfigs(); ++i) {
-      auto const& config = configs[i];
-      auto const& options = config.mOptions;
+      auto const options = configs[i].mOptions;
 
       if (options.mDtypeA == mOptions.eltType && options.mDtypeC == mOptions.outputType &&
           options.mTransposeMmaOutput == mOptions.transposeMmaOutput &&

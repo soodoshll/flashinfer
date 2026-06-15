@@ -479,31 +479,6 @@ TRTLLM_BATCH_PREFILL_DTYPES = [
 ]
 
 
-TRTLLM_BATCH_PREFILL_SHAPES = [
-    (4, 16, 2, 1),
-    (4, 32, 4, 5),
-    (4, 64, 4, 8),
-    (128, 16, 2, 5),
-    (128, 32, 4, 1),
-    (128, 64, 2, 8),
-    (256, 16, 4, 8),
-    (256, 32, 2, 8),
-    (256, 64, 4, 1),
-    (256, 64, 4, 5),
-]
-
-
-TRTLLM_BATCH_PREFILL_DTYPES = [
-    ("bf16", "bf16", "bf16"),
-    ("fp16", "fp16", "fp16"),
-    ("fp8", "fp8", "bf16"),
-    ("fp8", "fp8", "fp16"),
-    ("fp8", "fp8", "fp8"),
-    ("fp8", "fp8", "nvfp4"),
-    ("fp8", "nvfp4", "fp8"),
-]
-
-
 @pytest.mark.parametrize("kv_layout", ["HND", "NHD"])
 @pytest.mark.parametrize(
     "batch_size,page_size,num_kv_heads,head_grp_size",

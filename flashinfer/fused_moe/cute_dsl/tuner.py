@@ -76,13 +76,19 @@ def get_blackwell_gemm1_valid_tactics(tile_size: int) -> List[Tuple]:
 def get_blackwell_gemm2_valid_tactics(tile_size: int) -> List[Tuple]:
     """Get valid Blackwell tactics for GEMM2 (Finalize Fusion).
 
-    The finalize kernel uses use_2cta_instrs=False, so mma_tiler_mn M is
-    always 128 and cluster_shape_mn M is always 1, regardless of tile_size.
+    The finalize kernel's MMA shape must match tile_size because it consumes
+    the upstream gemm1 output layout. At tile_size=128 it uses 1-CTA mma_m=128;
+    at tile_size=256 it uses 2-CTA mma_m=256 (use_2cta_instrs=True). Returning a
+    1-CTA tactic at tile_size=256 yields a layout mismatch and incorrect output
+    (bug #3067, fixed upstream by #3171).
 
     Format: (mma_tiler_mn, cluster_shape_mn, raster_along_m)
     """
-    mma_tiler_mn_candidates = [(128, 128), (128, 256)]
-    cluster_shape_mn_candidates = [(1, 1), (1, 2)]
+    mma_tiler_mn_candidates = [(tile_size, 128), (tile_size, 256)]
+    cluster_shape_mn_candidates = [
+        (tile_size // 128, 1),
+        (tile_size // 128, 2),
+    ]
     raster_along_m_candidates = [False]
 
     return [
@@ -101,10 +107,11 @@ def get_blackwell_moe_valid_tactics() -> List[Tuple]:
     Returns: List of (tile_size, gemm1_tactic, gemm2_tactic)
     """
     tactics = []
-    # Only tile_size=128 is enabled. tile_size=256 (use_2cta_instrs=True)
-    # produces incorrect results in the GEMM1 gather+SwiGLU kernel and is
-    # disabled until the kernel bug is fixed.
-    for tile_size in [128]:
+    # tile_size=256 (2-CTA) is enabled: the gemm1(2-CTA)/gemm2(1-CTA) layout
+    # mismatch that caused incorrect results (#3067) is fixed by parameterizing
+    # get_blackwell_gemm2_valid_tactics on tile_size (#3171). Mirrors main's
+    # get_moe_valid_tactics over VALID_TILE_SIZES.
+    for tile_size in VALID_TILE_SIZES:
         gemm1_tactics = get_blackwell_gemm1_valid_tactics(tile_size)
         gemm2_tactics = get_blackwell_gemm2_valid_tactics(tile_size)
         for gemm1_tactic, gemm2_tactic in itertools.product(
