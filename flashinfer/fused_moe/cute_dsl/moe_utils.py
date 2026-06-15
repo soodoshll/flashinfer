@@ -616,6 +616,10 @@ def moe_sort(
 
     if out_tile_idx_to_mn_limit is not None:
         tile_idx_to_mn_limit = out_tile_idx_to_mn_limit
+        # Zero-fill for the same reason as tile_idx_to_expert_idx above: the Rubin
+        # even-tile rounding can read one mn_limit slot the routing kernel never
+        # wrote; a stale value there would corrupt row stores.
+        tile_idx_to_mn_limit.zero_()
     else:
         tile_idx_to_mn_limit = torch.zeros(
             (max_num_tiles,), dtype=torch.int32, device=device

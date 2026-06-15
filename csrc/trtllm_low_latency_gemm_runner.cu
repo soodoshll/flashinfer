@@ -139,8 +139,7 @@ class TrtllmLowLatencyGemmRunner {
     mPassingConfigIndices.clear();
 
     for (size_t i = 0; i < gemm.getNumGemmConfigs(); ++i) {
-      auto const& config = configs[i];
-      auto const& configOptions = config.mOptions;
+      auto const configOptions = configs[i].mOptions;
 
       if (configOptions.mDtypeA == mOptions.eltType &&
           configOptions.mDtypeC == mOptions.outputType &&

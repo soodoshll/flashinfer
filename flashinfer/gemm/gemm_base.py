@@ -1485,11 +1485,6 @@ def _cute_dsl_fp8_gemm_runner(arch: Literal["sm100", "sm107"]):
     return CuteDslFp8GemmRunner()
 
 
-def _cute_dsl_fp8_gemm_runner_sm100():
-    """Create a TunableRunner for CuTe-DSL FP8 GEMM on SM100 (Blackwell)."""
-    return _cute_dsl_fp8_gemm_runner("sm100")
-
-
 def _cute_dsl_fp8_gemm_runner_sm107():
     """Create a TunableRunner for CuTe-DSL FP8 GEMM on SM107 (Rubin)."""
     return _cute_dsl_fp8_gemm_runner("sm107")
@@ -1507,8 +1502,6 @@ def fp8_gemm_sm100(
     tuner = AutoTuner.get()
 
     runners = []
-    if "cute-dsl_sm100" in runner_names:
-        runners.append(_cute_dsl_fp8_gemm_runner_sm100())
     if "cute-dsl_sm107" in runner_names:
         runners.append(_cute_dsl_fp8_gemm_runner_sm107())
     if "cutlass_sm10x" in runner_names:
