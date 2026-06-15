@@ -5744,11 +5744,12 @@ def _cute_dsl_gemm_fp4_runner(
 
     sm_version = sm_major * 10 + sm_minor
 
-    # TODO(yunzheq): Re-enable SM103 kernel once cutlass-dsl package includes
-    # SM103MmaMXF4Op and compatible PersistentTileSchedulerParams.
-    # To re-enable, remove the `Sm103Kernel = None` line below.
+    # TODO(yunzheq): Re-enable SM103 kernel on Blackwell once cutlass-dsl package
+    # includes SM103MmaMXF4Op and compatible PersistentTileSchedulerParams. On
+    # Blackwell (sm103) this stays disabled to match main; the Sm103 kernel class
+    # is only used on Rubin (sm107), where the internal cutlass-dsl wheel supports it.
     Sm103Kernel = None
-    if sm_version in [103, 107]:
+    if sm_version == 107:
         try:
             from .kernels.dense_blockscaled_gemm_sm103 import (
                 Sm103BlockScaledPersistentDenseGemmKernel,
@@ -6353,7 +6354,7 @@ def _heuristic_func_mm_fp4(
     cuda_major = get_cuda_version().major
     # Get compute capability to distinguish between SM100 (10.0) and SM103 (10.3)
     major, minor = get_compute_capability(a.device)
-    is_sm10x = major == 10
+    is_sm107 = major == 10 and minor == 7
     is_sm103 = major == 10 and minor == 3
     is_sm120 = major == 12 and minor == 0
 
@@ -6369,11 +6370,13 @@ def _heuristic_func_mm_fp4(
     # On SM100 (B200), cudnn is more performant than cutlass.
     if CUDNN_AVAILABLE and cuda_major >= 13 and cudnn.backend_version() >= 91500:
         if is_sm103:
-            candidate_backends = ("cutlass", "cudnn", "cute-dsl")
-        else:
+            candidate_backends = ("cutlass", "cudnn")
+        elif is_sm107:
             candidate_backends = ("cudnn", "cutlass", "cute-dsl")
+        else:
+            candidate_backends = ("cudnn", "cutlass")
     # Otherwise, prioritize cutlass
-    elif is_sm10x:
+    elif is_sm107:
         candidate_backends = ("cutlass", "cudnn", "cute-dsl")
     else:
         candidate_backends = ("cutlass", "cudnn")
@@ -6794,10 +6797,10 @@ def _heuristic_func_bmm_fp8(
         and is_cute_dsl_aligned
         and is_cute_dsl_same_dtype
     ):
+        # cute-dsl bmm_fp8 is Rubin (sm107) only. Blackwell (sm100/sm103) aligns
+        # with main, which has no cute-dsl bmm_fp8 backend.
         if is_sm107_supported:
             heuristic_backends.append("cute-dsl_sm107")
-        elif is_sm_supported:
-            heuristic_backends.append("cute-dsl_sm100")
 
     return heuristic_backends
 

@@ -21,6 +21,7 @@ Blackwell-specific functions: fmin (with explicit return type),
 blk_reduce_bf16, blk_reduce_fp32, blk_reduce_fp16.
 """
 
+import functools
 from typing import Union
 
 import cutlass
@@ -47,6 +48,13 @@ from ..common.kernel_utils import (  # noqa: F401
 # ============================================================================
 
 
+@functools.lru_cache(maxsize=None)
+def _nvvm_fmin_needs_res():
+    import inspect
+
+    return "res" in inspect.signature(nvvm.fmin).parameters
+
+
 @dsl_user_op
 def fmin(
     a: Union[float, cutlass.Float32],
@@ -56,16 +64,15 @@ def fmin(
     loc=None,
     ip=None,
 ) -> cutlass.Float32:
-    return cutlass.Float32(
-        nvvm.fmin(
-            T.f32(),
-            cutlass.Float32(a).ir_value(loc=loc, ip=ip),
-            cutlass.Float32(b).ir_value(loc=loc, ip=ip),
-            nan=nan,
-            loc=loc,
-            ip=ip,
-        )
-    )
+    a_val = cutlass.Float32(a).ir_value(loc=loc, ip=ip)
+    b_val = cutlass.Float32(b).ir_value(loc=loc, ip=ip)
+    if _nvvm_fmin_needs_res():
+        # CUDA 12: nvvm.fmin(res, a, b, ...)
+        result = nvvm.fmin(T.f32(), a_val, b_val, nan=nan, loc=loc, ip=ip)
+    else:
+        # CUDA 13: nvvm.fmin(a, b, ...)
+        result = nvvm.fmin(a_val, b_val, nan=nan, loc=loc, ip=ip)
+    return cutlass.Float32(result)
 
 
 @dsl_user_op

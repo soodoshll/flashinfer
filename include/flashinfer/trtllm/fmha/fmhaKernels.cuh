@@ -265,6 +265,7 @@ class TllmGenFmhaKernel {
            (static_cast<uint64_t>(headDimV >> 3) << 34) |
            (static_cast<uint64_t>(tileSizeKv >> 6) << 42) | (numTokensPerPageLog2 << 44) |
            (static_cast<uint64_t>(log2(tileSizeQ)) << 49) |
+           (static_cast<uint64_t>(reuseSmemKForV) << 53) |
            (static_cast<uint64_t>(uses2CtaMma) << 54) |
            (static_cast<uint64_t>(sparseMlaType) << 55) |
            (static_cast<uint64_t>(skipsSoftmax) << 57) |
