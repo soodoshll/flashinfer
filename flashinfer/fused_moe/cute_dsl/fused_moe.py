@@ -67,8 +67,8 @@ from .moe_utils import (
     moe_output_memset_inplace,
     moe_sort,
 )
-from .blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion import (
-    blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_nvfp4,
+from .blockscaled_contiguous_gather_grouped_gemm_act_fusion import (
+    blockscaled_contiguous_gather_grouped_gemm_act_fusion_nvfp4,
 )
 from .blockscaled_contiguous_grouped_gemm_finalize_fusion import (
     blockscaled_contiguous_grouped_gemm_finalize_fusion_nvfp4,
@@ -77,7 +77,6 @@ from .tuner import (
     CuteDslFusedMoENvfp4Runner,
     _get_arch_tactics,
 )
-
 
 # =============================================================================
 # Module-level Resources for CUDA Graph Compatibility
@@ -149,6 +148,7 @@ def _moe_core_impl(
     output_dtype: torch.dtype = torch.bfloat16,
     use_async_memset: bool = True,
     enable_pdl: bool = True,
+    activation: str = "silu",
 ) -> torch.Tensor:
     """Core MoE implementation shared by functional and wrapper APIs.
 
@@ -253,9 +253,17 @@ def _moe_core_impl(
         main_event.record()
         moe_output.record_stream(aux_stream)
 
-    # Step 2: GEMM1 + SwiGLU
+    # Step 2: GEMM1 + activation
+    if activation == "silu":
+        gated = True
+    elif activation == "relu2":
+        gated = False
+    else:
+        raise ValueError(
+            f"CuteDSL MoE GEMM1 supports activation 'silu' or 'relu2', got {activation!r}."
+        )
     intermediate, intermediate_sf = (
-        blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_nvfp4(
+        blockscaled_contiguous_gather_grouped_gemm_act_fusion_nvfp4(
             a=x,
             b=w1_weight,
             a_scale=x_sf,
@@ -275,6 +283,7 @@ def _moe_core_impl(
             mma_tiler=gemm1_mma_tiler,
             mma_inst_shape=gemm1_mma_inst_shape,
             enable_pdl=enable_pdl,
+            gated=gated,
         )
     )
 
@@ -389,6 +398,7 @@ class CuteDslMoEWrapper:
         output_dtype: torch.dtype = torch.bfloat16,
         device: str = "cuda",
         enable_pdl: bool = True,
+        activation: str = "silu",
     ):
         r"""Configure the CuTe-DSL NVFP4 fused-MoE wrapper.
 
@@ -424,6 +434,9 @@ class CuteDslMoEWrapper:
             Device on which to allocate buffers.  Defaults to ``"cuda"``.
         enable_pdl : bool
             Enable Programmatic Dependent Launch.  Defaults to ``True``.
+        activation : str
+            FC1 activation function: ``"silu"`` for gated SwiGLU (default)
+            or ``"relu2"`` for ReLU².  Defaults to ``"silu"``.
         """
         self.num_experts = num_experts
         self.top_k = top_k
@@ -437,6 +450,7 @@ class CuteDslMoEWrapper:
         self.output_dtype = output_dtype
         self.device = device
         self.enable_pdl = enable_pdl
+        self.activation = activation
 
         # Persistent CUDA resources for async-memset / GEMM1 overlap. These
         # are created outside graph capture (so they can be reused inside it)
@@ -468,6 +482,7 @@ class CuteDslMoEWrapper:
             use_fused_finalize=True,
             output_dtype=output_dtype,
             enable_pdl=enable_pdl,
+            activation=activation,
         )
 
         if use_cuda_graph:
@@ -543,6 +558,7 @@ class CuteDslMoEWrapper:
             output_dtype=output_dtype,
             use_async_memset=True,
             enable_pdl=enable_pdl,
+            activation=self.activation,
         )
 
     @flashinfer_api(trace=cute_dsl_moe_wrapper_run_trace)
@@ -680,6 +696,7 @@ def _cute_dsl_fused_moe_nvfp4_impl(
     moe_output: Optional[torch.Tensor] = None,
     aux_stream: Optional[torch.cuda.Stream] = None,
     enable_pdl: bool = True,
+    activation: str = "silu",
 ) -> torch.Tensor:
     """Internal implementation called by auto-tuner for functional API."""
     return _moe_core_impl(
@@ -712,6 +729,7 @@ def _cute_dsl_fused_moe_nvfp4_impl(
         output_dtype=output_dtype,
         use_async_memset=True,
         enable_pdl=enable_pdl,
+        activation=activation,
     )
 
 
@@ -738,6 +756,7 @@ def cute_dsl_fused_moe_nvfp4(
     moe_output: Optional[torch.Tensor] = None,
     aux_stream: Optional[torch.cuda.Stream] = None,
     enable_pdl: bool = True,
+    activation: str = "silu",
 ) -> torch.Tensor:
     r"""Run a fused MoE forward pass using the CuTe-DSL NVFP4 kernels.
 
@@ -792,6 +811,9 @@ def cute_dsl_fused_moe_nvfp4(
         main computation.
     enable_pdl : bool
         Enable Programmatic Dependent Launch.  Defaults to ``True``.
+    activation : str
+        FC1 activation: ``"silu"`` for gated SwiGLU (default) or ``"relu2"``
+        for non-gated ReLU^2.
 
     Returns
     -------
@@ -822,6 +844,7 @@ def cute_dsl_fused_moe_nvfp4(
         use_fused_finalize=use_fused_finalize,
         output_dtype=output_dtype,
         enable_pdl=enable_pdl,
+        activation=activation,
     )
 
     inputs = [
