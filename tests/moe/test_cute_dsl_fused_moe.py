@@ -46,6 +46,14 @@ def is_sm10x():
     return props.major == 10
 
 
+def is_sm107():
+    """Check for Rubin (SM107)."""
+    if not torch.cuda.is_available():
+        return False
+    props = torch.cuda.get_device_properties(0)
+    return props.major == 10 and props.minor == 7
+
+
 # Back-compat alias: main's unified-MoE tests import ``is_sm100_family``; feat_sm107
 # renamed it to ``is_sm10x`` (Blackwell SM100/103 + Rubin SM107). Same check (major == 10).
 is_sm100_family = is_sm10x
@@ -1025,6 +1033,12 @@ class TestCuteDslFusedMoeFunctional:
         """Accuracy test for functional API across configurations."""
         from flashinfer import cute_dsl_fused_moe_nvfp4
 
+        if activation == "relu2" and is_sm107():
+            pytest.skip(
+                "Rubin (SM107) cute-dsl MoE kernels only implement the gated "
+                "(SwiGLU) activation path"
+            )
+
         gated = activation == "silu"
         num_local_experts = num_experts
 
@@ -1306,6 +1320,12 @@ class TestCuteDslMoEWrapper:
         """Test wrapper API with autotune context."""
         from flashinfer import autotune
         from flashinfer import CuteDslMoEWrapper
+
+        if activation == "relu2" and is_sm107():
+            pytest.skip(
+                "Rubin (SM107) cute-dsl MoE kernels only implement the gated "
+                "(SwiGLU) activation path"
+            )
 
         gated = activation == "silu"
         num_tokens, hidden_size, intermediate_size = 256, 256, 512

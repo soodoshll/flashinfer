@@ -2999,6 +2999,7 @@ def trtllm_batch_decode_with_kv_cache_mla(
             None,  # lse
             0,  # lse_stride_tokens
             0,  # lse_stride_heads
+            use_fp16_softmax,
         )
         return out
 
