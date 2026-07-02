@@ -244,7 +244,6 @@ def _get_compiled_finalize_kernel(
                 sf_vec_size=sf_vec_size,
                 mma_tiler_mn=mma_tiler_mn,
                 cluster_shape_mn=cluster_shape_mn,
-                use_blkred=True,
                 raster_along_m=raster_along_m,
                 enable_pdl=enable_pdl,
             )
@@ -419,6 +418,13 @@ def blockscaled_contiguous_grouped_gemm_finalize_fusion_nvfp4(
     ab_dtype_cutlass = get_cutlass_dtype(ab_dtype)
     sf_dtype_cutlass = get_cutlass_dtype(sf_dtype)
     out_dtype_cutlass = get_cutlass_dtype(out_dtype)
+    # Token final scales - determine dtype
+    if token_final_scales.dtype == torch.float32:
+        token_scales_dtype = cutlass.Float32
+    elif token_final_scales.dtype == torch.bfloat16:
+        token_scales_dtype = cutlass.BFloat16
+    else:
+        token_scales_dtype = cutlass.Float16
 
     if is_rubin:
         can_impl = (
@@ -447,6 +453,7 @@ def blockscaled_contiguous_grouped_gemm_finalize_fusion_nvfp4(
                 sf_dtype_cutlass,
                 sf_vec_size,
                 out_dtype_cutlass,
+                token_scales_dtype,
                 mma_tiler_mn,
                 cluster_shape_mn,
                 permuted_m,
@@ -462,6 +469,7 @@ def blockscaled_contiguous_grouped_gemm_finalize_fusion_nvfp4(
         raise ValueError(
             f"Unsupported configuration: ab_dtype={ab_dtype}, sf_dtype={sf_dtype}, "
             f"sf_vec_size={sf_vec_size}, out_dtype={out_dtype}, "
+            f"final_scale_dtype={token_final_scales.dtype}, "
             f"mma_tiler_mn={mma_tiler_mn}, mma_tiler={mma_tiler}, mma_inst_shape={mma_inst_shape}, "
             f"cluster_shape_mn={cluster_shape_mn}, shape=({permuted_m}, {n}, {k}, {num_experts})"
         )
@@ -520,13 +528,7 @@ def blockscaled_contiguous_grouped_gemm_finalize_fusion_nvfp4(
         cutlass.Int32, permuted_idx_to_expanded_idx.data_ptr(), cute.AddressSpace.gmem
     )
 
-    # Token final scales - determine dtype and create pointer
-    if token_final_scales.dtype == torch.float32:
-        token_scales_dtype = cutlass.Float32
-    elif token_final_scales.dtype == torch.bfloat16:
-        token_scales_dtype = cutlass.BFloat16
-    else:
-        token_scales_dtype = cutlass.Float16
+    # Token final scales - create pointer
     token_scales_ptr = make_ptr(
         token_scales_dtype,
         token_final_scales.data_ptr(),
