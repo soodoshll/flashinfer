@@ -24,6 +24,7 @@ from torch.nn import functional as F
 import flashinfer.fused_moe as fused_moe
 from flashinfer.quantization.nvfp4_quantization_utils import NVFP44Over6Config
 from flashinfer.utils import (
+    get_compute_capability,
     is_sm90a_supported,
     is_sm100a_supported,
     is_sm12x_supported,
@@ -2531,14 +2532,22 @@ def test_moe_nvfp4_ndim_padding_safety(
         ActivationType.Swiglu,
     )
     # Two-tier tolerance for FP4 at larger K dimensions (2048 vs 128 in existing tests):
-    # 1. Tight: >=95% of elements within atol=0.5 (baseline on SM120 is ~98%+).
-    #    If N-dim padding corruption occurs, this drops dramatically.
+    # 1. Tight: most elements within atol=0.5. The 95% bar was calibrated on
+    #    SM120 (~98%+ there) and also holds on SM100 (GB200 CI). On SM107 the
+    #    batch_size=1 rate is a deterministic function of the board SKU:
+    #    216-SM parts measure >=95%, 212-SM parts a stable 91.4% (identical
+    #    container/driver/inputs; tactic-independent — SM count changes the
+    #    grid decomposition and thus accumulation order). Rubin gets a 90%
+    #    bar to cover the legitimate band across SKUs. If N-dim padding
+    #    corruption occurs, this drops dramatically either way.
     # 2. Relaxed: 100% within atol=2.0. Catches catastrophic NaN/corruption.
     abs_diff = (ref_output - flash_output).abs()
     tight_match_rate = (abs_diff <= 0.5).float().mean().item()
-    assert tight_match_rate >= 0.95, (
+    is_sm107 = get_compute_capability(torch.device("cuda")) == (10, 7)
+    tight_bar = 0.90 if is_sm107 else 0.95
+    assert tight_match_rate >= tight_bar, (
         f"Only {tight_match_rate * 100:.1f}% of elements within tight tolerance (0.5). "
-        f"Expected >=95%."
+        f"Expected >={tight_bar * 100:.0f}%."
     )
     assert abs_diff.max().item() <= 2.0, (
         f"Max absolute difference {abs_diff.max().item():.4f} exceeds relaxed tolerance (2.0)."
