@@ -133,22 +133,20 @@ TrtllmGenBatchedGemmRunner::TrtllmGenBatchedGemmRunner(
       if ((int64_t)options.mEltwiseActType != (int64_t)mOptions.eltwiseActType) {
         continue;
       }
-      // SM107 (Rubin): the cubin pack ships Sm100f/Sm103a/Sm107a kernels in the
-      // same metainfo; with TLLM_RUBIN_FEATURES enabled the host launch path emits
-      // Rubin-mode sync/scheduling that Blackwell-only SASS can't honor (kernels
-      // stall). So on Rubin we must restrict to native Sm107a configs only.
+      // The catalog mixes Sm100a/Sm100f/Sm103a/Sm107a configs and the tactic
+      // ranking below is arch-blind, so keep only SASS the current GPU can run.
+      // SM107 (Rubin): native only — Rubin-mode sync/scheduling
+      // (TLLM_RUBIN_FEATURES) stalls with Blackwell-only SASS.
       if (sm_version == 107) {
         if (config.mSm != tg::CudaArch::Sm107a) continue;
       }
-      // SM100/SM103 (Blackwell): match main. Only pin to the native arch when
-      // mPatchF2fp is set; otherwise allow the Sm100f fallback. GB300 (sm103)
-      // relies on this fallback when no native Sm103a cubin exists for the shape
-      // — making this strict regressed the sglang Nemotron-FP8 path to
-      // "No kernel found". (Blackwell has no TLLM_RUBIN_FEATURES launch hazard.)
-      if (options.mPatchF2fp && sm_version == 103) {
-        if (config.mSm != tg::CudaArch::Sm103a) continue;
+      // SM103: Sm103a, or the Sm100f family fallback (needed when a shape has no
+      // native cubin); mPatchF2fp kernels are SASS-patched per arch, so native only.
+      if (sm_version == 103) {
+        if (config.mSm != tg::CudaArch::Sm103a && config.mSm != tg::CudaArch::Sm100f) continue;
+        if (options.mPatchF2fp && config.mSm != tg::CudaArch::Sm103a) continue;
       }
-      if (options.mPatchF2fp && sm_version == 100) {
+      if (sm_version == 100) {
         if (config.mSm != tg::CudaArch::Sm100a && config.mSm != tg::CudaArch::Sm100f) continue;
       }
       if (mOptions.transposeMmaOutput && options.mEpilogueTileM == mOptions.epilogueTileM) {
