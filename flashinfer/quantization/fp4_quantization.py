@@ -1972,7 +1972,7 @@ def nvfp4_kv_dequantize(
     return output
 
 
-@supported_compute_capability([80, 86, 89, 90, 100, 103, 110, 120, 121])
+@supported_compute_capability([80, 86, 89, 90, 100, 103, 107, 110, 120, 121])
 def _nvfp4_paged_kv_dequant_check(*args, **kwargs):
     return True
 
