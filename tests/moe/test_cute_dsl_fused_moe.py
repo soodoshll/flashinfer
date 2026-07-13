@@ -1119,6 +1119,11 @@ class TestCuteDslFusedMoeFunctional:
 
     def test_with_autotune(self):
         """Test functional API with autotune context."""
+        if is_sm107():
+            pytest.skip(
+                "Rubin (SM107) cute-dsl MoE kernels do not implement custom "
+                "SwiGLU constants (swiglu_alpha/beta/limit)"
+            )
         from flashinfer import autotune
         from flashinfer import cute_dsl_fused_moe_nvfp4
 
@@ -1160,6 +1165,11 @@ class TestCuteDslFusedMoeFunctional:
 
     def test_swiglu_oai_accuracy(self):
         """Accuracy test for the OAI SwiGLU epilogue variant."""
+        if is_sm107():
+            pytest.skip(
+                "Rubin (SM107) cute-dsl MoE kernels do not implement custom "
+                "SwiGLU constants (swiglu_alpha/beta/limit)"
+            )
         from flashinfer import cute_dsl_fused_moe_nvfp4
 
         num_tokens, hidden_size, intermediate_size = 128, 256, 512
@@ -1294,6 +1304,11 @@ class TestCuteDslMoEWrapper:
 
     def test_wrapper_swiglu_oai_accuracy(self):
         """Accuracy test for wrapper API with OAI SwiGLU."""
+        if is_sm107():
+            pytest.skip(
+                "Rubin (SM107) cute-dsl MoE kernels do not implement custom "
+                "SwiGLU constants (swiglu_alpha/beta/limit)"
+            )
         from flashinfer import CuteDslMoEWrapper
 
         num_tokens, hidden_size, intermediate_size = 128, 256, 512
@@ -1361,6 +1376,11 @@ class TestCuteDslMoEWrapper:
     @pytest.mark.parametrize("num_experts", [256, 384])
     def test_wrapper_cuda_graph(self, num_tokens: int, num_experts: int):
         """Test wrapper API with CUDA graph capture and replay."""
+        if is_sm107():
+            pytest.skip(
+                "Rubin (SM107) cute-dsl MoE kernels do not implement custom "
+                "SwiGLU constants (swiglu_alpha/beta/limit)"
+            )
         from flashinfer import CuteDslMoEWrapper
 
         hidden_size, intermediate_size = 256, 512
@@ -1635,6 +1655,11 @@ class TestCuteDslMoEWrapper:
     def test_cuda_graph_wrapper_lifetime_after_autotune(self):
         """Dropped CUDA graph wrappers should not wait for cyclic GC,
         even after autotune profiling has populated the autotuner cache."""
+        if is_sm107():
+            pytest.skip(
+                "Rubin (SM107) cute-dsl MoE kernels do not implement custom "
+                "SwiGLU constants (swiglu_alpha/beta/limit)"
+            )
         from flashinfer import autotune
         from flashinfer import CuteDslMoEWrapper
         from flashinfer.autotuner import AutoTuner
