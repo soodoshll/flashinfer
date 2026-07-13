@@ -50,6 +50,12 @@ import cutlass.cute as cute
 import cuda.bindings.driver as cuda
 import torch
 
+from flashinfer.tllm_enums import (
+    ActivationType,
+    DEFAULT_SWIGLU_ALPHA,
+    DEFAULT_SWIGLU_BETA,
+    DEFAULT_SWIGLU_LIMIT,
+)
 from flashinfer.utils import get_compute_capability
 from flashinfer.cute_dsl.utils import (
     get_cutlass_dtype,
@@ -58,6 +64,7 @@ from flashinfer.cute_dsl.utils import (
     get_max_active_clusters,
     make_ptr,
 )
+from .moe_utils import normalize_cute_dsl_moe_activation_type
 
 # Import the Blackwell (SM100) kernel implementation
 from .blackwell.blockscaled_contiguous_gather_grouped_gemm_act_fusion import (
@@ -229,6 +236,10 @@ def _get_compiled_gather_kernel(
     mma_inst_shape: Optional[Tuple[int, int, int]] = None,
     # PDL control
     enable_pdl: bool = True,
+    activation_type: int = ActivationType.Swiglu.value,
+    swiglu_alpha: float = DEFAULT_SWIGLU_ALPHA,
+    swiglu_beta: float = DEFAULT_SWIGLU_BETA,
+    swiglu_limit: float = DEFAULT_SWIGLU_LIMIT,
     gated: bool = True,
 ):
     """Get or compile the gather grouped GEMM with FC1 activation fusion.
@@ -240,6 +251,13 @@ def _get_compiled_gather_kernel(
     via mma_tiler + mma_inst_shape) architectures.
     """
     global _gather_kernel_cache
+    activation_type, expected_gated = normalize_cute_dsl_moe_activation_type(
+        activation_type
+    )
+    if gated != expected_gated:
+        raise ValueError(
+            f"gated={gated} is inconsistent with activation_type {activation_type!r}"
+        )
 
     is_rubin = mma_tiler is not None and mma_inst_shape is not None
 
@@ -257,19 +275,34 @@ def _get_compiled_gather_kernel(
         vectorized_f32,
         raster_along_m,
         enable_pdl,
+        activation_type.value,
+        swiglu_alpha,
+        swiglu_beta,
+        swiglu_limit,
         gated,
     )
 
     if cache_key not in _gather_kernel_cache:
         if is_rubin:
             # The Rubin (SM107) kernel currently only implements the gated
-            # (SwiGLU) activation path.
-            if not gated:
+            # (SwiGLU) activation path with the default SwiGLU constants.
+            if activation_type != ActivationType.Swiglu:
                 raise NotImplementedError(
-                    "Non-gated activation (gated=False) is not supported by the "
-                    "Rubin (SM107) gather grouped GEMM kernel yet."
+                    f"activation_type {activation_type!r} is not supported by "
+                    "the Rubin (SM107) gather grouped GEMM kernel yet "
+                    "(SwiGLU only)."
                 )
-            gemm_rubin = Sm107BlockScaledContiguousGatherGroupedGemmSwigluFusionKernel(
+            if (swiglu_alpha, swiglu_beta, swiglu_limit) != (
+                DEFAULT_SWIGLU_ALPHA,
+                DEFAULT_SWIGLU_BETA,
+                DEFAULT_SWIGLU_LIMIT,
+            ):
+                raise NotImplementedError(
+                    "Custom swiglu_alpha/swiglu_beta/swiglu_limit are not "
+                    "supported by the Rubin (SM107) gather grouped GEMM "
+                    "kernel yet."
+                )
+            gemm = Sm107BlockScaledContiguousGatherGroupedGemmSwigluFusionKernel(
                 sf_vec_size=sf_vec_size,
                 mma_inst_shape=mma_inst_shape,
                 mma_tiler=mma_tiler,
@@ -279,9 +312,9 @@ def _get_compiled_gather_kernel(
                 raster_along_m=raster_along_m,
                 enable_pdl=enable_pdl,
             )
-            wrapper_fn = gemm_rubin.wrapper
         else:
-            gemm_bw = BlockScaledContiguousGatherGroupedGemmKernel(
+            # Create kernel instance
+            gemm = BlockScaledContiguousGatherGroupedGemmKernel(
                 sf_vec_size=sf_vec_size,
                 mma_tiler_mn=mma_tiler_mn,
                 cluster_shape_mn=cluster_shape_mn,
@@ -289,9 +322,13 @@ def _get_compiled_gather_kernel(
                 topk=topk,
                 raster_along_m=raster_along_m,
                 enable_pdl=enable_pdl,
+                activation_type=activation_type.value,
+                swiglu_alpha=swiglu_alpha,
+                swiglu_beta=swiglu_beta,
+                swiglu_limit=swiglu_limit,
                 gated=gated,
             )
-            wrapper_fn = gemm_bw.wrapper
+        wrapper_fn = gemm.wrapper
 
         compiled_gemm = cute.compile(
             wrapper_fn,
@@ -351,6 +388,10 @@ def blockscaled_contiguous_gather_grouped_gemm_act_fusion_nvfp4(
     mma_tiler: Optional[Tuple[int, int, int]] = None,
     mma_inst_shape: Optional[Tuple[int, int, int]] = None,
     enable_pdl: bool = True,
+    activation_type: int = ActivationType.Swiglu.value,
+    swiglu_alpha: float = DEFAULT_SWIGLU_ALPHA,
+    swiglu_beta: float = DEFAULT_SWIGLU_BETA,
+    swiglu_limit: float = DEFAULT_SWIGLU_LIMIT,
     gated: bool = True,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """Blockscaled Contiguous Gather Grouped GEMM with SwiGLU Fusion for MoE workloads.
@@ -394,6 +435,15 @@ def blockscaled_contiguous_gather_grouped_gemm_act_fusion_nvfp4(
         vectorized_f32: Use vectorized f32x2 operations. Default: True
         raster_along_m: If True, raster tiles along M dimension. Default: False
         sm_count: Number of SMs to use. Default: max available.
+        activation_type: Activation type for the epilogue. Use
+            ActivationType.Swiglu for gated mode and ActivationType.Relu2 for
+            non-gated mode; swiglu_oai is represented as Swiglu with
+            non-default swiglu_alpha/beta/limit.
+        swiglu_alpha: SwiGLU sigmoid multiplier.
+        swiglu_beta: SwiGLU up-projection bias.
+        swiglu_limit: SwiGLU clamp limit.
+        gated: Whether to run the gated SwiGLU path. If False, run non-gated
+            ReLU2.
 
     Returns:
         Tuple of:
@@ -436,6 +486,13 @@ def blockscaled_contiguous_gather_grouped_gemm_act_fusion_nvfp4(
     # Validate inputs
     assert a.device.type == "cuda", "Input tensors must be on CUDA device"
     assert b.device.type == "cuda", "Input tensors must be on CUDA device"
+    activation_type, expected_gated = normalize_cute_dsl_moe_activation_type(
+        activation_type
+    )
+    if gated != expected_gated:
+        raise ValueError(
+            f"gated={gated} is inconsistent with activation_type {activation_type!r}"
+        )
 
     # Get dimensions
     seq_len = a.shape[0]
@@ -635,6 +692,10 @@ def blockscaled_contiguous_gather_grouped_gemm_act_fusion_nvfp4(
         mma_tiler=mma_tiler if is_rubin else None,
         mma_inst_shape=mma_inst_shape if is_rubin else None,
         enable_pdl=enable_pdl,
+        activation_type=activation_type.value,
+        swiglu_alpha=swiglu_alpha,
+        swiglu_beta=swiglu_beta,
+        swiglu_limit=swiglu_limit,
         gated=gated,
     )
 

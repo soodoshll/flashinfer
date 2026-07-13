@@ -35,6 +35,15 @@ import pytest
 import torch
 from torch.nn import functional as F
 
+from flashinfer.tllm_enums import (
+    ActivationType,
+    DEFAULT_SWIGLU_ALPHA,
+    DEFAULT_SWIGLU_BETA,
+    DEFAULT_SWIGLU_LIMIT,
+)
+from flashinfer.fused_moe.cute_dsl.moe_utils import (
+    normalize_cute_dsl_moe_activation_type,
+)
 from flashinfer.cute_dsl import is_cute_dsl_available
 
 
@@ -67,11 +76,6 @@ sm10x_required = pytest.mark.skipif(
     not is_sm10x(),
     reason="Requires SM10x GPU (Blackwell or Rubin)",
 )
-
-
-def silu(x: torch.Tensor) -> torch.Tensor:
-    """SiLU activation: x * sigmoid(x)"""
-    return x * torch.sigmoid(x)
 
 
 def interleave_linear_and_gate(
@@ -131,7 +135,10 @@ def compute_reference_moe_fp4(
     fc2_input_scale: torch.Tensor = None,
     num_local_experts: int = None,
     local_expert_offset: int = 0,
-    gated: bool = True,
+    activation_type: int = ActivationType.Swiglu.value,
+    swiglu_alpha: float = DEFAULT_SWIGLU_ALPHA,
+    swiglu_beta: float = DEFAULT_SWIGLU_BETA,
+    swiglu_limit: float = DEFAULT_SWIGLU_LIMIT,
 ) -> torch.Tensor:
     """Compute reference MoE output using PyTorch operations on GPU.
 
@@ -149,10 +156,17 @@ def compute_reference_moe_fp4(
         fc2_input_scale: Optional scale for FC2 input quantization
         num_local_experts: Number of local experts (for EP). Defaults to num_experts.
         local_expert_offset: Starting expert ID for this EP rank. Defaults to 0.
+        activation_type: GEMM1 activation type. Use ActivationType.Swiglu for
+            gated SwiGLU/OAI and ActivationType.Relu2 for non-gated ReLU^2.
+        swiglu_alpha: SwiGLU sigmoid multiplier.
+        swiglu_beta: SwiGLU up-projection bias.
+        swiglu_limit: SwiGLU clamp limit.
 
     Returns:
         Output tensor [num_tokens, hidden_size]
     """
+    activation_type, gated = normalize_cute_dsl_moe_activation_type(activation_type)
+
     if num_local_experts is None:
         num_local_experts = num_experts
 
@@ -187,7 +201,13 @@ def compute_reference_moe_fp4(
             if gated:
                 linear = gemm1_out[:, :intermediate_size]
                 gate = gemm1_out[:, intermediate_size:]
-                act_out = silu(gate) * linear
+                gate_clamped = gate.clamp(max=swiglu_limit)
+                linear_clamped = linear.clamp(min=-swiglu_limit, max=swiglu_limit)
+                act_out = (
+                    gate_clamped
+                    * torch.sigmoid(swiglu_alpha * gate_clamped)
+                    * (linear_clamped + swiglu_beta)
+                )
             else:
                 act_out = torch.relu(gemm1_out) ** 2
 
@@ -933,7 +953,7 @@ class TestAutotunerBucketConfig:
         TRT-LLM's ``last_positive_power_of_2(x)`` behavior. Locks in
         the fi/trt-llm parity that IS achievable in this regime.
         """
-        from flashinfer.fused_moe.utils import last_positive_power_of_2
+        from flashinfer.utils import last_positive_power_of_2
 
         result = bucket_spec.map_to_tuning_buckets(x)
         assert result == x == last_positive_power_of_2(x), (
@@ -988,7 +1008,7 @@ class TestAutotunerBucketConfig:
         least the same coarse-grained coverage as TRT-LLM at every
         power-of-2 boundary up to the input dim.
         """
-        from flashinfer.fused_moe.utils import last_positive_power_of_2
+        from flashinfer.utils import last_positive_power_of_2
 
         fi_buckets = set(bucket_spec.gen_tuning_buckets(max_n))
         # Mirror TRT-LLM's get_last_power_of_2_num_tokens_buckets:
@@ -1020,10 +1040,12 @@ class TestCuteDslFusedMoeFunctional:
     @pytest.mark.parametrize("top_k", [1, 2, 8])
     @pytest.mark.parametrize("num_tokens", [128, 515, 1024])
     @pytest.mark.parametrize("num_experts", [256, 384])
-    @pytest.mark.parametrize("activation", ["silu", "relu2"])
+    @pytest.mark.parametrize(
+        "activation_type", [ActivationType.Swiglu, ActivationType.Relu2]
+    )
     def test_numerical_accuracy(
         self,
-        activation: str,
+        activation_type: ActivationType,
         num_tokens: int,
         top_k: int,
         hidden_size: int,
@@ -1033,13 +1055,13 @@ class TestCuteDslFusedMoeFunctional:
         """Accuracy test for functional API across configurations."""
         from flashinfer import cute_dsl_fused_moe_nvfp4
 
-        if activation == "relu2" and is_sm107():
+        if activation_type == ActivationType.Relu2 and is_sm107():
             pytest.skip(
                 "Rubin (SM107) cute-dsl MoE kernels only implement the gated "
                 "(SwiGLU) activation path"
             )
 
-        gated = activation == "silu"
+        _, gated = normalize_cute_dsl_moe_activation_type(activation_type)
         num_local_experts = num_experts
 
         tensors = create_moe_tensors(
@@ -1067,7 +1089,7 @@ class TestCuteDslFusedMoeFunctional:
             num_experts=num_experts,
             top_k=top_k,
             num_local_experts=num_local_experts,
-            activation=activation,
+            activation_type=activation_type,
         )
 
         assert result.shape == (num_tokens, hidden_size)
@@ -1087,7 +1109,7 @@ class TestCuteDslFusedMoeFunctional:
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
             fc2_input_scale=tensors["fc2_input_scale"],
-            gated=gated,
+            activation_type=activation_type,
         )
 
         passed, percent_within, atol = check_accuracy(result, ref_output)
@@ -1127,10 +1149,73 @@ class TestCuteDslFusedMoeFunctional:
                 w2_alpha=tensors["w2_alpha"],
                 num_experts=num_experts,
                 top_k=top_k,
+                activation_type=ActivationType.Swiglu,
+                swiglu_alpha=1.702,
+                swiglu_beta=1.0,
+                swiglu_limit=7.0,
             )
 
         assert result.shape == (num_tokens, hidden_size)
         assert not torch.isnan(result).any()
+
+    def test_swiglu_oai_accuracy(self):
+        """Accuracy test for the OAI SwiGLU epilogue variant."""
+        from flashinfer import cute_dsl_fused_moe_nvfp4
+
+        num_tokens, hidden_size, intermediate_size = 128, 256, 512
+        num_experts, top_k = 256, 2
+
+        tensors = create_moe_tensors(
+            num_tokens=num_tokens,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            num_experts=num_experts,
+            num_local_experts=num_experts,
+            top_k=top_k,
+        )
+
+        result = cute_dsl_fused_moe_nvfp4(
+            x=tensors["x"],
+            x_sf=tensors["x_sf"],
+            token_selected_experts=tensors["token_selected_experts"],
+            token_final_scales=tensors["token_final_scales"],
+            w1_weight=tensors["w1_weight"],
+            w1_weight_sf=tensors["w1_weight_sf"],
+            w1_alpha=tensors["w1_alpha"],
+            fc2_input_scale=tensors["fc2_input_scale"],
+            w2_weight=tensors["w2_weight"],
+            w2_weight_sf=tensors["w2_weight_sf"],
+            w2_alpha=tensors["w2_alpha"],
+            num_experts=num_experts,
+            top_k=top_k,
+            activation_type=ActivationType.Swiglu,
+            swiglu_alpha=1.702,
+            swiglu_beta=1.0,
+            swiglu_limit=7.0,
+        )
+
+        ref_output = compute_reference_moe_fp4(
+            hidden_states=tensors["x_bf16"].float().cuda(),
+            gemm1_weights=tensors["w1_weight_bf16"].float().cuda(),
+            gemm2_weights=tensors["w2_weight_bf16"].float().cuda(),
+            token_selected_experts=tensors["token_selected_experts"],
+            token_final_scales=tensors["token_final_scales"],
+            num_tokens=num_tokens,
+            num_experts=num_experts,
+            top_k=top_k,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            fc2_input_scale=tensors["fc2_input_scale"],
+            activation_type=ActivationType.Swiglu,
+            swiglu_alpha=1.702,
+            swiglu_beta=1.0,
+            swiglu_limit=7.0,
+        )
+
+        passed, percent_within, atol = check_accuracy(result, ref_output)
+        assert passed, (
+            f"Only {percent_within * 100:.2f}% within tolerance (atol={atol:.4f})"
+        )
 
 
 # =============================================================================
@@ -1207,6 +1292,71 @@ class TestCuteDslMoEWrapper:
             f"Only {percent_within * 100:.2f}% within tolerance (atol={atol:.4f})"
         )
 
+    def test_wrapper_swiglu_oai_accuracy(self):
+        """Accuracy test for wrapper API with OAI SwiGLU."""
+        from flashinfer import CuteDslMoEWrapper
+
+        num_tokens, hidden_size, intermediate_size = 128, 256, 512
+        num_experts, top_k = 256, 2
+
+        tensors = create_moe_tensors(
+            num_tokens=num_tokens,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            num_experts=num_experts,
+            num_local_experts=num_experts,
+            top_k=top_k,
+        )
+
+        moe = CuteDslMoEWrapper(
+            num_experts=num_experts,
+            top_k=top_k,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            use_cuda_graph=False,
+            activation_type=ActivationType.Swiglu,
+            swiglu_alpha=1.702,
+            swiglu_beta=1.0,
+            swiglu_limit=7.0,
+        )
+
+        result = moe.run(
+            x=tensors["x"],
+            x_sf=tensors["x_sf"],
+            token_selected_experts=tensors["token_selected_experts"],
+            token_final_scales=tensors["token_final_scales"],
+            w1_weight=tensors["w1_weight"],
+            w1_weight_sf=tensors["w1_weight_sf"],
+            w1_alpha=tensors["w1_alpha"],
+            fc2_input_scale=tensors["fc2_input_scale"],
+            w2_weight=tensors["w2_weight"],
+            w2_weight_sf=tensors["w2_weight_sf"],
+            w2_alpha=tensors["w2_alpha"],
+        )
+
+        ref_output = compute_reference_moe_fp4(
+            hidden_states=tensors["x_bf16"].float().cuda(),
+            gemm1_weights=tensors["w1_weight_bf16"].float().cuda(),
+            gemm2_weights=tensors["w2_weight_bf16"].float().cuda(),
+            token_selected_experts=tensors["token_selected_experts"],
+            token_final_scales=tensors["token_final_scales"],
+            num_tokens=num_tokens,
+            num_experts=num_experts,
+            top_k=top_k,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            fc2_input_scale=tensors["fc2_input_scale"],
+            activation_type=ActivationType.Swiglu,
+            swiglu_alpha=1.702,
+            swiglu_beta=1.0,
+            swiglu_limit=7.0,
+        )
+
+        passed, percent_within, atol = check_accuracy(result, ref_output)
+        assert passed, (
+            f"Only {percent_within * 100:.2f}% within tolerance (atol={atol:.4f})"
+        )
+
     @pytest.mark.parametrize("num_tokens", [64, 128, 256])
     @pytest.mark.parametrize("num_experts", [256, 384])
     def test_wrapper_cuda_graph(self, num_tokens: int, num_experts: int):
@@ -1233,6 +1383,10 @@ class TestCuteDslMoEWrapper:
             intermediate_size=intermediate_size,
             use_cuda_graph=True,
             max_num_tokens=num_tokens,
+            activation_type=ActivationType.Swiglu,
+            swiglu_alpha=1.702,
+            swiglu_beta=1.0,
+            swiglu_limit=7.0,
         )
 
         # Warmup
@@ -1308,6 +1462,10 @@ class TestCuteDslMoEWrapper:
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
             fc2_input_scale=tensors["fc2_input_scale"],
+            activation_type=ActivationType.Swiglu,
+            swiglu_alpha=1.702,
+            swiglu_beta=1.0,
+            swiglu_limit=7.0,
         )
 
         passed, percent_within, atol = check_accuracy(results[0], ref_output)
@@ -1315,19 +1473,21 @@ class TestCuteDslMoEWrapper:
             f"CUDA graph accuracy: {percent_within * 100:.2f}% (atol={atol:.4f})"
         )
 
-    @pytest.mark.parametrize("activation", ["silu", "relu2"])
-    def test_wrapper_with_autotune(self, activation: str):
+    @pytest.mark.parametrize(
+        "activation_type", [ActivationType.Swiglu, ActivationType.Relu2]
+    )
+    def test_wrapper_with_autotune(self, activation_type: ActivationType):
         """Test wrapper API with autotune context."""
         from flashinfer import autotune
         from flashinfer import CuteDslMoEWrapper
 
-        if activation == "relu2" and is_sm107():
+        if activation_type == ActivationType.Relu2 and is_sm107():
             pytest.skip(
                 "Rubin (SM107) cute-dsl MoE kernels only implement the gated "
                 "(SwiGLU) activation path"
             )
 
-        gated = activation == "silu"
+        _, gated = normalize_cute_dsl_moe_activation_type(activation_type)
         num_tokens, hidden_size, intermediate_size = 256, 256, 512
         num_experts, top_k = 256, 2
 
@@ -1347,7 +1507,7 @@ class TestCuteDslMoEWrapper:
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
             use_cuda_graph=False,
-            activation=activation,
+            activation_type=activation_type,
         )
 
         with autotune(True):
@@ -1380,7 +1540,7 @@ class TestCuteDslMoEWrapper:
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
             fc2_input_scale=tensors["fc2_input_scale"],
-            gated=gated,
+            activation_type=activation_type,
         )
 
         passed, percent_within, atol = check_accuracy(result, ref_output)
@@ -1534,7 +1694,7 @@ class TestCuteDslMoEWrapper:
             # are (custom_op, runner_class, hash(runner), profile, extras)
             # tuples; see AutoTuner._get_cache_key in flashinfer/autotuner.py.
             assert any(
-                isinstance(k, tuple) and k[:1] == ("CuteDslMoEWrapper::run",)
+                isinstance(k, tuple) and k[:1] == ("CuteDslMoEWrapper::run::Swiglu",)
                 for k in autotuner.profiling_cache
             ), "autotune(True) did not populate a CuteDslMoEWrapper::run cache entry"
             return ref, finalized
