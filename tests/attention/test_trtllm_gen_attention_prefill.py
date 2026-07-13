@@ -82,6 +82,10 @@ def _test_trtllm_batch_prefill(
 
     # NVFP4 KV cache constraints
     if kv_dtype == "nvfp4":
+        if compute_capability == (10, 7):
+            pytest.skip(
+                "No trtllm-gen NVFP4-KV attention kernels exist for SM107 yet"
+            )
         if q_dtype != "fp8":
             pytest.skip("NVFP4 KV cache requires FP8 query")
         if o_dtype != "fp8":
