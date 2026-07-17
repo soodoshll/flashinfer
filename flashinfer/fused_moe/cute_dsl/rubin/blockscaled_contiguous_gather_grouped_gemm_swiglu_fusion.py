@@ -192,7 +192,13 @@ class Sm107BlockScaledContiguousGatherGroupedGemmSwigluFusionKernel:
         a_path: str = "cpasync",
         use_pdl: bool = True,
         ugpu_half_gemm: bool = False,
+        enable_pdl: Optional[bool] = None,
     ):
+        # flashinfer dispatcher compatibility: the pre-sync kernel took
+        # `enable_pdl`; TRT-LLM renamed it to `use_pdl`. Explicit enable_pdl
+        # wins over the use_pdl default.
+        if enable_pdl is not None:
+            use_pdl = enable_pdl
         self.a_path = a_path
         # uGPU half-GEMM: two partitions write their N-half into a shared
         # full-width C/SFC buffer at a column offset (see wrapper/__call__).

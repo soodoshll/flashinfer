@@ -171,7 +171,12 @@ class Sm107BlockScaledContiguousGroupedGemmFinalizeFusionKernel:
         cluster_shape_mn: Tuple[int, int],
         raster_along_m: bool = False,
         topK: int = 1,
+        enable_pdl: Optional[bool] = None,
     ):
+        # flashinfer dispatcher compatibility: the pre-sync kernel took
+        # `enable_pdl`; the TRT-LLM version has no PDL path, so the value is
+        # accepted and ignored.
+        del enable_pdl
         self.sf_vec_size = sf_vec_size
         self.acc_dtype = cutlass.Float32
         self.mma_inst_shape = mma_inst_shape
