@@ -44,6 +44,7 @@ import cutlass.utils as utils
 import cutlass.utils.blackwell_helpers as sm100_utils
 import cutlass.utils.blockscaled_layout as blockscaled_utils
 import cutlass.utils.rubin_helpers as sm107_utils
+from flashinfer.gemm.kernels.epilogue_utils import epilogue_tma_store_with_alpha
 import torch
 from cutlass.cute.nvgpu import OperandMajorMode, cpasync, tcgen05
 from cutlass.cute.nvgpu.tcgen05.mma import CollectorOp
@@ -1885,7 +1886,9 @@ class Sm107BlockScaledPersistentDenseGemmKernel(Sm100BlockScaledPersistentDenseG
                 tile_sched.advance_to_next_work()
                 work_tile = tile_sched.get_current_work()
 
-                acc_consumer_state = utils.gemm.sm100.epilogue_tma_store(
+                # flashinfer local fix (b53cfd6a7, not in TRT-LLM): apply alpha in
+                # Float32 before the c_dtype conversion to avoid fp16 overflow.
+                acc_consumer_state = epilogue_tma_store_with_alpha(
                     self,
                     tidx,
                     warp_idx,
@@ -1895,7 +1898,8 @@ class Sm107BlockScaledPersistentDenseGemmKernel(Sm100BlockScaledPersistentDenseG
                     tCgC,
                     epi_tile,
                     tile_sched.num_tiles_executed,
-                    lambda x: epilogue_op(alpha_value * x),
+                    epilogue_op,
+                    alpha_value,
                     mma_tile_coord_mnl,
                     acc_consumer_state,
                     acc_pipeline,
@@ -3815,7 +3819,9 @@ class Sm107BlockScaledPersistentDenseGemmMixedClustersKernel(
                 tile_sched.advance_to_next_work()
                 work_tile = tile_sched.get_current_work()
 
-                acc_consumer_state = utils.gemm.sm100.epilogue_tma_store(
+                # flashinfer local fix (b53cfd6a7, not in TRT-LLM): apply alpha in
+                # Float32 before the c_dtype conversion to avoid fp16 overflow.
+                acc_consumer_state = epilogue_tma_store_with_alpha(
                     self,
                     tidx,
                     warp_idx,
@@ -3825,7 +3831,8 @@ class Sm107BlockScaledPersistentDenseGemmMixedClustersKernel(
                     tCgC,
                     epi_tile,
                     tile_sched.num_tiles_executed,
-                    lambda x: epilogue_op(alpha_value * x),
+                    epilogue_op,
+                    alpha_value,
                     mma_tile_coord_mnl,
                     acc_consumer_state,
                     acc_pipeline,
