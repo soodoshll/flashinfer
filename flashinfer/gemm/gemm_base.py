@@ -6240,13 +6240,19 @@ def _cute_dsl_gemm_fp4_runner(
             make_kernel: Callable
             if kernel_type == "sm107" and Sm107Kernel is not None:
                 sm107_params = (
-                    use_tma_store  # repurposed: (inst_m, inst_n, inst_k, tiler_k[, prefetch_dist])
+                    use_tma_store  # repurposed: (inst_m, inst_n, inst_k, tiler_k, prefetch_dist)
                 )
-                # 5th element (prefetch_dist) added with the TRT-LLM kernel sync;
-                # tolerate 4-tuples from older autotune cache files -> prefetch off.
-                sm107_prefetch_dist = (
-                    sm107_params[4] if len(sm107_params) > 4 else 0
-                )
+                # prefetch_dist became part of the sm107 tactic with the TRT-LLM
+                # kernel sync; 4-tuple configs (e.g. from autotune cache files
+                # written before the sync) are invalid and must be re-tuned.
+                if len(sm107_params) != 5:
+                    raise ValueError(
+                        "sm107 mm_fp4 tactic params must be a 5-tuple "
+                        "(inst_m, inst_n, inst_k, tiler_k, prefetch_dist); got "
+                        f"{sm107_params!r}. Stale autotune cache configs from "
+                        "before the TRT-LLM kernel sync must be re-tuned."
+                    )
+                sm107_prefetch_dist = sm107_params[4]
                 make_kernel = lambda: Sm107Kernel(
                     sf_vec_size,
                     (sm107_params[0], sm107_params[1], sm107_params[2]),
