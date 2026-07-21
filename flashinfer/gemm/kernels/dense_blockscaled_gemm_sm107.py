@@ -199,7 +199,9 @@ class Sm107BlockScaledPersistentDenseGemmKernel(Sm100BlockScaledPersistentDenseG
         mma_inst_shape: Tuple[int, int, int],
         mma_tiler: Tuple[int, int, int],
         cluster_shape_mn: Tuple[int, int],
-        prefetch_dist: Union[int, None] = None,
+        # flashinfer default: prefetch off (TRT-LLM's auto default costs
+        # 25-40% untuned at generic shapes on Rubin; expose via tactics instead)
+        prefetch_dist: Union[int, None] = 0,
         swizzle_size: int = 1,
         raster_order: Literal["m", "n"] = "m",
     ):
@@ -2545,7 +2547,9 @@ class Sm107BlockScaledPersistentDenseGemmMixedClustersKernel(
         mma_tiler: Tuple[int, int, int],
         preferred_cluster_shape_mn: Tuple[int, int],
         fallback_cluster_shape_mn: Tuple[int, int],
-        prefetch_dist: Union[int, None] = None,
+        # flashinfer default: prefetch off (TRT-LLM's auto default costs
+        # 25-40% untuned at generic shapes on Rubin; expose via tactics instead)
+        prefetch_dist: Union[int, None] = 0,
     ):
         super().__init__(
             sf_vec_size,
