@@ -6139,21 +6139,26 @@ def _cute_dsl_gemm_fp4_runner(
                                 ):
                                     continue
 
-                                valid_tactics.append(
-                                    (  # type: ignore[arg-type]
-                                        mma_tiler_mn,
-                                        cluster_shape_mn,
-                                        swap_ab,
-                                        False,  # no prefetch for SM107
-                                        "sm107",
-                                        (
-                                            mma_inst_shape_m,
-                                            mma_tiler_mn[1],
-                                            mma_inst_shape_k,
-                                            mma_tiler_k,
-                                        ),
+                                # prefetch_dist: 0=off (best default at generic
+                                # shapes), 2=shallow, None=auto (num_ab_stage
+                                # depth; helps at long-K DSV4-like shapes)
+                                for prefetch_dist in (0, 2, None):
+                                    valid_tactics.append(
+                                        (  # type: ignore[arg-type]
+                                            mma_tiler_mn,
+                                            cluster_shape_mn,
+                                            swap_ab,
+                                            False,  # use_prefetch is SM100-only
+                                            "sm107",
+                                            (
+                                                mma_inst_shape_m,
+                                                mma_tiler_mn[1],
+                                                mma_inst_shape_k,
+                                                mma_tiler_k,
+                                                prefetch_dist,
+                                            ),
+                                        )
                                     )
-                                )
 
             return valid_tactics
 
@@ -6184,7 +6189,7 @@ def _cute_dsl_gemm_fp4_runner(
                         False,
                         False,
                         "sm107",
-                        (128, 128, 128, 256),
+                        (128, 128, 128, 256, 0),  # prefetch off by default
                     )
                 else:
                     # Use analytical heuristic to pick the best tactic based on
@@ -6235,13 +6240,14 @@ def _cute_dsl_gemm_fp4_runner(
             make_kernel: Callable
             if kernel_type == "sm107" and Sm107Kernel is not None:
                 sm107_params = (
-                    use_tma_store  # repurposed: (inst_m, inst_n, inst_k, tiler_k)
+                    use_tma_store  # repurposed: (inst_m, inst_n, inst_k, tiler_k, prefetch_dist)
                 )
                 make_kernel = lambda: Sm107Kernel(
                     sf_vec_size,
                     (sm107_params[0], sm107_params[1], sm107_params[2]),
                     (mma_tiler_mn[0], mma_tiler_mn[1], sm107_params[3]),
                     cluster_shape_mn,
+                    prefetch_dist=sm107_params[4],
                 )
             elif kernel_type == "sm103" and Sm103Kernel is not None:
                 make_kernel = lambda: Sm103Kernel(
