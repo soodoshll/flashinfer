@@ -76,6 +76,25 @@ def fmin(
 
 
 @dsl_user_op
+def blk_copy(dst_gemm, src_smem, size, loc=None, ip=None):
+    llvm.inline_asm(
+        None,
+        [
+            dst_gemm.iterator.toint(loc=loc, ip=ip).ir_value(loc=loc, ip=ip),
+            src_smem.iterator.toint(loc=loc, ip=ip).ir_value(loc=loc, ip=ip),
+            size.ir_value(loc=loc, ip=ip),
+        ],
+        "cp.async.bulk.global.shared::cta.bulk_group [$0], [$1], $2;",
+        "l,r,r",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_user_op
 def blk_reduce_bf16(dst_gemm, src_smem, size, loc=None, ip=None):
     llvm.inline_asm(
         None,

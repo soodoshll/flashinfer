@@ -71,11 +71,10 @@ def gen_fp4_quantization_sm103_module() -> JitSpec:
     return gen_fp4_quantization_module(sm103a_nvcc_flags, "103")
 
 
-def gen_fp4_quantization_sm107_module(map_sm107_to_100f: bool = True) -> JitSpec:
-    # SM107 (Rubin) maps to sm100f while the CUTLASS submodule doesn't
-    # recognise compute_107a (TMA macros would not be defined).
-    # Set map_sm107_to_100f=False once CUTLASS adds SM107 support.
-    nvcc_flags = sm100f_nvcc_flags if map_sm107_to_100f else sm107a_nvcc_flags
+def gen_fp4_quantization_sm107_module() -> JitSpec:
+    from flashinfer.compilation_context import cutlass_supports_sm107
+
+    nvcc_flags = sm107a_nvcc_flags if cutlass_supports_sm107() else sm100f_nvcc_flags
     return gen_fp4_quantization_module(nvcc_flags, "107")
 
 

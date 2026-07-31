@@ -48,7 +48,18 @@ def get_max_tmem_alloc_cols(compute_capability: str) -> int:
 
 
 def get_current_arch() -> str:
-    """Return the cutlass-dsl arch string ('sm_100', 'sm_103', 'sm_107', ...)
-    for the current default CUDA device."""
+    """Return the cutlass-dsl arch string ('sm_100', 'sm_103', ...)
+    for the current default CUDA device.
+
+    When the installed DSL lacks the device's own architecture but can
+    target it through the family-conditional arch (e.g. sm_107 via
+    sm_100f), return the family base ('sm_100') so capacity lookups and
+    kernel configuration use family-portable values."""
     major, minor = get_compute_capability(torch.device("cuda"))
+    from ..utils import is_cute_dsl_arch_supported
+
+    if not is_cute_dsl_arch_supported(
+        major, minor, native_only=True
+    ) and is_cute_dsl_arch_supported(major, minor):
+        return f"sm_{major}0"
     return f"sm_{major}{minor}"

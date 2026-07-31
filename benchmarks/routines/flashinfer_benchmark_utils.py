@@ -58,6 +58,7 @@ output_column_dict = {
         "weight_dtype",
         "activation_type",
         "fp4_mode",
+        "cold_l2_cache",
         # CUTLASS fused MoE specific
         "cutlass_variant",
         "quantized_input",
@@ -147,6 +148,12 @@ output_column_dict = {
         "update_state",
         "use_qk_l2norm",
     ],
+    "msa": [
+        "topk",
+        "max_k_tiles",
+        "total_q",
+        "total_kv",
+    ],
     "general": [
         "batch_size",
         "hidden_size",
@@ -185,6 +192,7 @@ full_output_columns = (
     + output_column_dict["rope"]
     + output_column_dict["mamba"]
     + output_column_dict["gdn"]
+    + output_column_dict["msa"]
     + output_column_dict["general"]
 )
 
@@ -199,6 +207,7 @@ benchmark_apis = {
         "gemm_fp8_nt_groupwise",
         "group_gemm_fp8_nt_groupwise",
         "bmm_fp8",
+        "mm_fp8",
         "bmm_mxfp8",
         "mm_fp4",
         "mm_bf16_fp4",
@@ -233,6 +242,7 @@ benchmark_apis = {
         "gemma_fused_add_rmsnorm",
         "rmsnorm_quant",
         "fused_add_rmsnorm_quant",
+        "layernorm_quant",
         "rmsnorm_fp4quant",
         "add_rmsnorm_fp4quant",
         "fused_rmsnorm_silu",
@@ -279,6 +289,12 @@ benchmark_apis = {
         "gated_delta_rule_decode",
         "gated_delta_rule_mtp",
         "chunk_gated_delta_rule",
+    ],
+    "sparse_attention": [
+        "MSAProxyScore",
+        "MSASparseAttention",
+        "MSASparseDecode",
+        "MSAPipeline",
     ],
 }
 
@@ -478,7 +494,7 @@ routine_cc_to_supported_backends = {
         "12.0": ["tinygemm"],
         "12.1": ["tinygemm"],
     },
-    # Note: bmm_fp8, mm_fp4, mm_bf16, and bmm_bf16 use support checkers to filter backends, so they are not listed here
+    # Note: bmm_fp8, mm_fp8, mm_fp4, mm_bf16, and bmm_bf16 use support checkers to filter backends, so they are not listed here
     # MOE
     "trtllm_fp4_block_scale_moe": {
         "7.5": [],
@@ -622,6 +638,17 @@ routine_cc_to_supported_backends = {
         "10.3": ["cute-dsl"],
         "12.0": ["cute-dsl"],
         "12.1": ["cute-dsl"],
+    },
+    "layernorm_quant": {
+        "7.5": ["cuda"],
+        "8.0": ["cuda"],
+        "8.6": ["cuda"],
+        "8.9": ["cuda"],
+        "9.0": ["cuda"],
+        "10.0": ["cuda"],
+        "10.3": ["cuda"],
+        "12.0": ["cuda"],
+        "12.1": ["cuda"],
     },
     # NORM - FP4 Quantization (Blackwell SM100+ only, CuTe-DSL kernels)
     "rmsnorm_fp4quant": {
