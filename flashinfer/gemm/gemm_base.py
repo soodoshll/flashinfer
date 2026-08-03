@@ -64,6 +64,7 @@ from .kernels.utils import (
     _score_sm100_mm_fp4_tactic,
     _select_sm100_bmm_fp8_cute_dsl_tactic,
     _select_sm100_mm_fp4_cute_dsl_tactic,
+    _select_sm107_mm_fp4_cute_dsl_tactic,
 )
 from ..utils import (
     get_device_index,
@@ -6320,9 +6321,14 @@ def _cute_dsl_gemm_fp4_runner(
             # DSR1 gains less because its decode is dominated by
             # trtllm_fp4_block_scale_moe, which this path does not touch.
             if tactic is None or tactic == -1:
-                tactic = _select_sm100_mm_fp4_cute_dsl_tactic(
-                    m, n, real_k, get_device_sm_count(a.device), sf_vec_size
-                )
+                if sm_version == 107 and Sm107Kernel is not None:
+                    tactic = _select_sm107_mm_fp4_cute_dsl_tactic(
+                        m, n, real_k, get_device_sm_count(a.device), sf_vec_size
+                    )
+                else:
+                    tactic = _select_sm100_mm_fp4_cute_dsl_tactic(
+                        m, n, real_k, get_device_sm_count(a.device), sf_vec_size
+                    )
 
             (
                 mma_tiler_mn,
