@@ -137,22 +137,22 @@ class ArtifactPath:
 
     TRTLLM_GEN_FMHA: str = "3432cbfe9c7fa561a421afe2350a832e26f7113f/fmha/trtllm-gen/"
     TRTLLM_GEN_BMM: str = (
-        "5988e15c0e6d006c6a64c0f6c6748b4d3150c1af/batched_gemm-3d40263-3e19f0a/"
+        "81a53cff31466d62c8b5d7651750e3c1cf496f9e/batched_gemm-a33b928-dirty-9838725/"
     )
     TRTLLM_GEN_GEMM: str = (
         "3432cbfe9c7fa561a421afe2350a832e26f7113f/gemm-f3a8850-dirty-25754e6/"
     )
     TRTLLM_GEN_BMM_RUBIN: str = (
-        "46d3f3561e3336c131a141191ee6aaa0690723bb/batched_gemm-17629de-61f1bc7/"
+        "81a53cff31466d62c8b5d7651750e3c1cf496f9e/batched_gemm-a33b928-dirty-9838725/"
     )
     TRTLLM_GEN_GEMM_RUBIN: str = (
-        "46d3f3561e3336c131a141191ee6aaa0690723bb/gemm-17629de-25754e6/"
+        "3432cbfe9c7fa561a421afe2350a832e26f7113f/gemm-f3a8850-dirty-25754e6/"
     )
     CUDNN_SDPA: str = "a72d85b019dc125b9f711300cb989430f762f5a6/fmha/cudnn/"
     # For DEEPGEMM, we also need to update KernelMap.KERNEL_MAP_HASH in flashinfer/deep_gemm.py
     # (and KernelMap.KERNEL_MAP_HASH_RUBIN for the Rubin variant below).
-    DEEPGEMM: str = "a72d85b019dc125b9f711300cb989430f762f5a6/deep-gemm/"
-    DEEPGEMM_RUBIN: str = "7ec7ac40b9fd48172651b77ff2ebe20d79decc39/deep-gemm/"
+    DEEPGEMM: str = "0cda165ac08d98a71c3eb8495c3604e59274d515/deep-gemm/"
+    DEEPGEMM_RUBIN: str = "0cda165ac08d98a71c3eb8495c3604e59274d515/deep-gemm/"
     DSL_FMHA: str = "d5ca6d7983565354ed6160f8244fb7760ae01975/fmha/cute-dsl/"
     DSL_FMHA_ARCHS: tuple[str, ...] = ("sm_100a", "sm_103a", "sm_107a", "sm_110a")
 
@@ -168,20 +168,20 @@ class CheckSumHash:
         "bceb5bdef423eccb1d60ad6ee435134c44f297c6ad08ae7c79fe1ace0679f613"
     )
     TRTLLM_GEN_BMM: str = (
-        "b19ed6c8b1d3fc13ced823bd65ee764d35a19080aea97e742c82ee73ce4c19b0"
+        "1bdaedbe1b00268ebdc652dff6bd8027618d107951588976deba59cc124c2a30"
     )
-    DEEPGEMM: str = "1a2a166839042dbd2a57f48051c82cd1ad032815927c753db269a4ed10d0ffbf"
+    DEEPGEMM: str = "55ead31e0ec32d7c33ef530e22c0523fcc67573d85f388fb496cc76193c7fa8c"
     DEEPGEMM_RUBIN: str = (
-        "09e961d4e3852a6cf81b3482d0604c09dcb1f69c1b7936f535c9ee2f53335184"
+        "55ead31e0ec32d7c33ef530e22c0523fcc67573d85f388fb496cc76193c7fa8c"
     )
     TRTLLM_GEN_GEMM: str = (
         "d86f6cbea5cbd9bfde759fda8ec50df30866a1021a6db29a98394dde4c92afd4"
     )
     TRTLLM_GEN_BMM_RUBIN: str = (
-        "31c9f4cdd59299fc6a9a6f3a31b403b817a1fea63238eec2cbcd3009d2feb3f7"
+        "1bdaedbe1b00268ebdc652dff6bd8027618d107951588976deba59cc124c2a30"
     )
     TRTLLM_GEN_GEMM_RUBIN: str = (
-        "2174e60bc8248a8af41a3d0afdc4cac8f2b04893ac983f654065dd14c77ec139"
+        "d86f6cbea5cbd9bfde759fda8ec50df30866a1021a6db29a98394dde4c92afd4"
     )
     # SHA256 of the checksums.txt manifest file per cpu-arch/sm-arch,
     # NOT hashes of individual kernel .so files.
