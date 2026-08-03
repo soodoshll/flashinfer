@@ -6280,24 +6280,49 @@ def _cute_dsl_gemm_fp4_runner(
                         f"serially during profiling."
                     )
 
-            # sm100 and sm103 uses default sm100 kernel
-            # sm107 uses default sm107 kernel
+            # Untuned path: use the analytical heuristic on every arch,
+            # including sm107.
+            #
+            # sm107 previously took a hardcoded constant here -- ((128,128),
+            # (1,1), swap_ab=False, "sm107", (128,128,128,256,0)) -- that
+            # ignored m, n and k, while sm100/sm103 called the heuristic. That
+            # asymmetry is what makes vllm-project/vllm#48268 ("skip fp4_gemm
+            # autotuning, its fallback is already the analytical heuristic")
+            # false on Rubin: downstream measured a 1.56x decode regression at
+            # concurrency 1 on vr200nvl, and re-enabling autotuning instead
+            # blew the core-models SLURM budget.
+            #
+            # The sm100 selector is correct here, not an sm107-specific one:
+            # the sm100 kernel runs on Rubin (sm_100f family target) and
+            # get_valid_tactics enumerates sm100 tactics on sm107, so the
+            # untuned path may pick them -- and the autotuner does. Over 110
+            # tuned fp4_gemm shapes on DeepSeek-R1 nvfp4 tp4 (VR200), its own
+            # winners split:
+            #
+            #     M <= 32     sm100 29, sm107  1
+            #     M 33-512    sm100 16, sm107  4
+            #     M > 512     sm107 41, sm100 19
+            #
+            # Every M<=32 winner is swap_ab=True on tile_n in {8, 16, 32} --
+            # tiles the sm107 kernel cannot express, since
+            # is_valid_mma_tiler_and_cluster_shape floors tile_n at 64 and its
+            # swap_ab additionally requires m % 8 == 0. The sm100 selector
+            # reaches that family; an sm107-only selector cannot, which is
+            # exactly where low-concurrency decode lives.
+            #
+            # End-to-end, VR200 tp2, nvfp4, dummy weights, concurrency 1,
+            # 512-token prompt / 256 decode tokens, best of 3, autotuning
+            # skipped so only this fallback differs:
+            #
+            #     llama3.3-70B    92.62 -> 130.84 tok/s   +41.3%
+            #     DeepSeek-R1    128.10 -> 138.43 tok/s    +8.1%
+            #
+            # DSR1 gains less because its decode is dominated by
+            # trtllm_fp4_block_scale_moe, which this path does not touch.
             if tactic is None or tactic == -1:
-                if sm_version == 107 and Sm107Kernel is not None:
-                    tactic = (
-                        _SM100_DEFAULT_MMA_TILER_MN,
-                        _SM100_DEFAULT_CLUSTER_SHAPE_MN,
-                        False,
-                        False,
-                        "sm107",
-                        (128, 128, 128, 256, 0),  # prefetch off by default
-                    )
-                else:
-                    # Use analytical heuristic to pick the best tactic based on
-                    # tile and wave quantization efficiency.
-                    tactic = _select_sm100_mm_fp4_cute_dsl_tactic(
-                        m, n, real_k, get_device_sm_count(a.device), sf_vec_size
-                    )
+                tactic = _select_sm100_mm_fp4_cute_dsl_tactic(
+                    m, n, real_k, get_device_sm_count(a.device), sf_vec_size
+                )
 
             (
                 mma_tiler_mn,
