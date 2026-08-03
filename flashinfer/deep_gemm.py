@@ -1615,9 +1615,9 @@ class KernelMap:
     # Hash for kernel_map.json, updated when deepgemm cubins are republished.
     # The Rubin (sm_107) cubins ship a separate kernel_map.json, so it has its
     # own hash selected by arch in init_indices().
-    KERNEL_MAP_HASH = "f161e031826adb8c4f0d31ddbd2ed77e4909e4e43cdfc9728918162a62fcccfb"
+    KERNEL_MAP_HASH = "4d5a11d5c408f459eb45510b3aed8b9df246fdf217c41362b9aa68f6b62091af"
     KERNEL_MAP_HASH_RUBIN = (
-        "f8bf2b1bc943170559a9f18cfdcec2c30d84ba872d13f66dd52b9be3f3a36e27"
+        "4d5a11d5c408f459eb45510b3aed8b9df246fdf217c41362b9aa68f6b62091af"
     )
 
     def __init__(self):
