@@ -57,12 +57,15 @@ from .utils import (
 )
 
 
-def is_sm10x():
-    """Check for SM10x family (Blackwell: SM100, SM103; Rubin: SM107)."""
+def is_sm100_family():
+    """Check for SM100 family (Blackwell: SM100, SM103).
+
+    CuteDSL MoE NVFP4 does not target Rubin SM107.
+    """
     if not torch.cuda.is_available():
         return False
     props = torch.cuda.get_device_properties(0)
-    return props.major == 10
+    return (props.major, props.minor) in ((10, 0), (10, 3))
 
 
 def is_sm107():
@@ -73,19 +76,21 @@ def is_sm107():
     return props.major == 10 and props.minor == 7
 
 
-# Back-compat alias: main's unified-MoE tests import ``is_sm100_family``; feat_sm107
-# renamed it to ``is_sm10x`` (Blackwell SM100/103 + Rubin SM107). Same check (major == 10).
-is_sm100_family = is_sm10x
+# Back-compat alias: feat_sm107 tests below still reference ``is_sm10x``; upstream
+# de-scoped Rubin SM107 from CuteDSL MoE NVFP4, so the alias now points at main's
+# narrowed SM100/103 check (these tests skip on SM107).
+is_sm10x = is_sm100_family
 
 
 # Skip decorators
 cute_dsl_available = pytest.mark.skipif(
     not is_cute_dsl_available(), reason="CuteDSL not available"
 )
-sm10x_required = pytest.mark.skipif(
-    not is_sm10x(),
-    reason="Requires SM10x GPU (Blackwell or Rubin)",
+sm100_required = pytest.mark.skipif(
+    not is_sm100_family(),
+    reason="Requires CuteDSL MoE target SM100 or SM103",
 )
+sm10x_required = sm100_required
 
 
 # =============================================================================
@@ -455,6 +460,13 @@ class TestAutotuneReplayMemsetContract:
         self, monkeypatch, api, is_tuning_mode
     ):
         from flashinfer.fused_moe.cute_dsl import fused_moe
+
+        # CPU-only contract test (see class header): stub out the functional
+        # API's arch guard, which otherwise calls torch.cuda.get_device_capability()
+        # on the CPU input tensors and raises "Expected a cuda device, but got: cpu".
+        monkeypatch.setattr(
+            fused_moe, "_require_cute_dsl_arch_for", lambda *a, **k: None
+        )
 
         calls = []
 
