@@ -258,7 +258,11 @@ def gen_trtllm_gen_fused_moe_sm100_module(enable_rubin: bool = False) -> JitSpec
         else CheckSumHash.TRTLLM_GEN_BMM
     )
     module_name = "fused_moe_trtllm_sm107" if enable_rubin else "fused_moe_trtllm_sm100"
-    rubin_flags = ["-DTLLM_RUBIN_FEATURES"] if enable_rubin else []
+    # Unconditional: TRTLLM_GEN_BMM and TRTLLM_GEN_BMM_RUBIN pin the same internal
+    # Rubin cubin pack on feat_sm107, so the non-Rubin module also compiles that
+    # pack's headers and needs the macro. See gen_trtllm_gen_gemm_module in
+    # jit/gemm/core.py.
+    rubin_flags = ["-DTLLM_RUBIN_FEATURES"]
     include_path = f"{bmm_path}/include"
     header_name = "flashinferMetaInfo"
 
