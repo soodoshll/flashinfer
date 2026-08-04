@@ -732,7 +732,12 @@ def gen_trtllm_gen_gemm_module(enable_rubin: bool = False) -> JitSpec:
         else CheckSumHash.TRTLLM_GEN_GEMM
     )
     module_name = "trtllm_gemm_sm107" if enable_rubin else "trtllm_gemm"
-    rubin_flags = ["-DTLLM_RUBIN_FEATURES"] if enable_rubin else []
+    # Unconditional on feat_sm107: TRTLLM_GEN_GEMM and TRTLLM_GEN_GEMM_RUBIN pin
+    # the *same* internal Rubin cubin pack, so even the non-Rubin module compiles
+    # that pack's flashinferMetaInfo.h - which references CudaArch::Sm107a and
+    # other symbols that only exist under this macro. Upstream gates this on
+    # enable_rubin, which is correct there because upstream's two pins differ.
+    rubin_flags = ["-DTLLM_RUBIN_FEATURES"]
     include_path = f"{gemm_path}/include"
     header_name = "flashinferMetaInfo"
 
@@ -921,7 +926,8 @@ def gen_trtllm_low_latency_gemm_module(enable_rubin: bool = False) -> JitSpec:
     module_name = (
         "trtllm_low_latency_gemm_sm107" if enable_rubin else "trtllm_low_latency_gemm"
     )
-    rubin_flags = ["-DTLLM_RUBIN_FEATURES"] if enable_rubin else []
+    # Unconditional - see the note in gen_trtllm_gen_gemm_module above.
+    rubin_flags = ["-DTLLM_RUBIN_FEATURES"]
     include_path = f"{gemm_path}/include"
     header_name = "flashinferMetaInfo"
 
