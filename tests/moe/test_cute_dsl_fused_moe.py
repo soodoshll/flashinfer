@@ -76,10 +76,18 @@ def is_sm107():
     return props.major == 10 and props.minor == 7
 
 
-# Back-compat alias: feat_sm107 tests below still reference ``is_sm10x``; upstream
-# de-scoped Rubin SM107 from CuteDSL MoE NVFP4, so the alias now points at main's
-# narrowed SM100/103 check (these tests skip on SM107).
-is_sm10x = is_sm100_family
+def is_sm10x():
+    """Check for the SM10x family, Rubin SM107 included.
+
+    ``is_sm100_family`` above is upstream's and deliberately excludes SM107.
+    On feat_sm107 we *do* want CuteDSL fused-MoE NVFP4 coverage on VR200, so
+    the ``sm10x_required`` classes below keep running there. This is a
+    deliberate divergence from main - see pluh/scripts/MERGE_RULES.md.
+    """
+    if not torch.cuda.is_available():
+        return False
+    props = torch.cuda.get_device_properties(0)
+    return (props.major, props.minor) in ((10, 0), (10, 3), (10, 7))
 
 
 # Skip decorators
@@ -90,7 +98,10 @@ sm100_required = pytest.mark.skipif(
     not is_sm100_family(),
     reason="Requires CuteDSL MoE target SM100 or SM103",
 )
-sm10x_required = sm100_required
+sm10x_required = pytest.mark.skipif(
+    not is_sm10x(),
+    reason="Requires CuteDSL MoE target SM100, SM103 or SM107",
+)
 
 
 # =============================================================================
