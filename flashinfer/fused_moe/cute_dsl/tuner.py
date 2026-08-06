@@ -619,9 +619,7 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
         else:
             final_scale_dtype = cutlass.Float16
 
-        valid_tactics = []
-
-        for tactic in all_tactics:
+        def _tactic_ok(tactic):
             tile_size, gemm1_tactic, gemm2_tactic = tactic
             permuted_m = get_max_num_permuted_tokens(
                 num_tokens, self.top_k, self.num_local_experts, tile_size
@@ -631,7 +629,7 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
                 # The Rubin (SM107) kernels only implement the gated (SwiGLU)
                 # activation path; skip Rubin tactics for non-gated activations.
                 if not gated:
-                    continue
+                    return False
 
                 from .rubin import (
                     Sm107BlockScaledContiguousGatherGroupedGemmSwigluFusionKernel,
@@ -720,21 +718,27 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
                     out_major="n",
                 )
 
-            if gemm1_ok and gemm2_ok:
-                valid_tactics.append(tactic)
+            return gemm1_ok and gemm2_ok
+
+        valid_tactics = [t for t in all_tactics if _tactic_ok(t)]
 
         if not valid_tactics:
+            # The default tactic is a member of the arch tactic list, so an empty
+            # list means even the default fails can_implement -- do not fall
+            # back to it unvalidated (gh #3957). This early refusal is
+            # diagnostics/defense-in-depth: the kernel wrappers re-validate
+            # can_implement at launch and raise, so an unvalidated tactic
+            # cannot reach the device -- but refusing here avoids pointless
+            # profiling of a tactic that can only throw, and says why.
             logger.warning(
                 "No valid tactics found for problem dims "
-                "(tokens=%d, hidden=%d, intermediate=%d, experts=%d, top_k=%d). "
-                "Falling back to default tactic.",
+                "(tokens=%d, hidden=%d, intermediate=%d, experts=%d, top_k=%d).",
                 num_tokens,
                 hidden_size,
                 intermediate_size,
                 num_local_experts,
                 self.top_k,
             )
-            valid_tactics = [_get_default_tactic()]
 
         return valid_tactics
 
