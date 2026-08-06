@@ -1073,11 +1073,6 @@ class TestCuteDslFusedMoeFunctional:
                 "Rubin (SM107) cute-dsl MoE kernels only implement the gated "
                 "(SwiGLU) activation path"
             )
-        if use_per_token_activation and is_sm107():
-            pytest.skip(
-                "Rubin (SM107) cute-dsl MoE kernels do not implement "
-                "per-token activation scale (a_per_token_scale)"
-            )
 
         _, gated = normalize_cute_dsl_moe_activation_type(activation_type)
         num_local_experts = num_experts
@@ -1281,12 +1276,6 @@ class TestCuteDslMoEWrapper:
     ):
         """Accuracy test for wrapper API."""
         from flashinfer import CuteDslMoEWrapper
-
-        if use_per_token_activation and is_sm107():
-            pytest.skip(
-                "Rubin (SM107) cute-dsl MoE kernels do not implement "
-                "per-token activation scale (a_per_token_scale)"
-            )
 
         hidden_size, intermediate_size = 256, 512
 
@@ -1993,12 +1982,6 @@ class TestExpertParallelism:
     ):
         """Test functional API with expert parallelism and numerical accuracy."""
         from flashinfer import cute_dsl_fused_moe_nvfp4
-
-        if use_per_token_activation and is_sm107():
-            pytest.skip(
-                "Rubin (SM107) cute-dsl MoE kernels do not implement "
-                "per-token activation scale (a_per_token_scale)"
-            )
 
         # Test middle rank to ensure offset handling works
         ep_rank = ep_size // 2
