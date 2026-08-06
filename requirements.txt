@@ -29,9 +29,12 @@ nccl4py>=0.3.1
 ninja
 numpy
 nvidia-cudnn-frontend>=1.25.0
-# Rubin CuTe-DSL kernels require the internal DSL build; it supersedes the
-# public nvidia-cutlass-dsl on feat_sm107.
-nvidia-cutlass-dsl-internal
+# CuTe DSL from the 4.8 release branch (release/cutlass-dsl-4.8-ctk-13.4);
+# replaces the internal DSL build previously used on feat_sm107. ==4.8.0a0
+# resolves to the release-branch local versions (4.8.0a0+<ts>.<sha>) and
+# excludes the .dev nightlies. Published on the internal index:
+# https://urm.nvidia.com/artifactory/api/pypi/nv-shared-pypi-local/simple
+nvidia-cutlass-dsl[cu13]==4.8.0a0
 nvidia-ml-py
 packaging>=24.2
 requests
