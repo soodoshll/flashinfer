@@ -234,6 +234,13 @@ def _get_compiled_finalize_kernel(
 
     if cache_key not in _finalize_kernel_cache:
         if is_rubin:
+            if use_a_per_token_scale:
+                raise NotImplementedError(
+                    "use_a_per_token_scale (per-token activation scale) is "
+                    "not supported by the Rubin (SM107) finalize grouped "
+                    "GEMM kernel yet: its wrapper has no "
+                    "a_per_token_scale_ptr parameter."
+                )
             gemm_rubin = Sm107BlockScaledContiguousGroupedGemmFinalizeFusionKernel(
                 sf_vec_size=sf_vec_size,
                 mma_inst_shape=mma_inst_shape,
@@ -256,13 +263,16 @@ def _get_compiled_finalize_kernel(
             )
             wrapper_fn = gemm_bw.wrapper
 
-        # Create kernel instance
-        # Compile with runtime parameters - they can vary across calls
-        # Order must match wrapper signature:
+        # Compile with runtime parameters - they can vary across calls.
+        # Order must match the wrapper signature, and the two wrappers have
+        # DIFFERENT arities: the Blackwell wrapper takes a_per_token_scale_ptr
+        # (12 pointers), the Rubin SM107 wrapper does not (11 pointers).
+        # Passing the extra pointer to the SM107 wrapper shifts every argument
+        # one slot ("multiple values for argument 'tile_size'").
         # (a_ptr, b_ptr, a_sf_ptr, b_sf_ptr, c_ptr, alpha_ptr,
         #  tile_idx_to_group_idx_ptr, tile_idx_to_mn_limit_ptr,
         #  permuted_idx_to_expanded_idx_ptr, num_non_exiting_tiles_ptr,
-        #  token_final_scales_ptr, a_per_token_scale_ptr,
+        #  token_final_scales_ptr, [a_per_token_scale_ptr],
         #  m, n, k, l, num_tokens, top_k,
         #  tile_size, scaling_vector_size, max_active_clusters, stream)
         compiled_gemm = cute.compile(
@@ -278,7 +288,7 @@ def _get_compiled_finalize_kernel(
             permuted_idx_ptr,
             num_tiles_ptr,
             token_scales_ptr,
-            a_per_token_scale_ptr,
+            *([] if is_rubin else [a_per_token_scale_ptr]),
             permuted_m,
             n,
             k,
@@ -608,11 +618,13 @@ def blockscaled_contiguous_grouped_gemm_finalize_fusion_nvfp4(
         use_a_per_token_scale=use_a_per_token_scale,
     )
 
-    # Execute kernel with runtime parameters
-    # Order must match wrapper signature:
+    # Execute kernel with runtime parameters.
+    # Order must match the wrapper signature; the Rubin SM107 wrapper has no
+    # a_per_token_scale_ptr parameter (see the arity note at the compile site),
+    # so on Rubin the extra pointer must be omitted here too.
     # (a_ptr, b_ptr, a_sf_ptr, b_sf_ptr, c_ptr, alpha_ptr, tile_idx_ptr,
     #  mn_limit_ptr, permuted_idx_ptr, num_tiles_ptr, token_scales_ptr,
-    #  a_per_token_scale_ptr, m, n, k, l, num_tokens, top_k, stream)
+    #  [a_per_token_scale_ptr], m, n, k, l, num_tokens, top_k, stream)
     compiled_gemm(
         a_ptr,
         b_ptr,
@@ -625,7 +637,7 @@ def blockscaled_contiguous_grouped_gemm_finalize_fusion_nvfp4(
         permuted_idx_ptr,
         num_tiles_ptr,
         token_scales_ptr,
-        a_per_token_scale_ptr,
+        *([] if is_rubin else [a_per_token_scale_ptr]),
         permuted_m,
         n,
         k,
