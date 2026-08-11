@@ -1575,9 +1575,31 @@ def _cute_dsl_direct_bf16_gemm_runner(
         autotune_tactics,
         default_tactic,
         run_direct_dense,
+        validate_tactic,
     )
 
     class CuteDSLDirectBf16Runner(TunableRunner):
+        def is_tactic_compatible(
+            self, inputs: List[torch.Tensor], tactic: object
+        ) -> bool:
+            if tactic == -1:
+                return True
+            a, b, bias, *_ = inputs
+            if bias is not None:
+                return False
+            try:
+                if not isinstance(tactic, (DirectTactic, tuple, list)):
+                    return False
+                tactic = (
+                    tactic
+                    if isinstance(tactic, DirectTactic)
+                    else DirectTactic(*tactic)
+                )
+                validate_tactic(tactic, a.shape[0], b.shape[1], a.shape[1])
+            except (TypeError, ValueError):
+                return False
+            return True
+
         def get_cache_key_extras(self, inputs: List[torch.Tensor]) -> tuple:
             a, _, _, pdl, out, *_ = inputs
             return (
@@ -1643,6 +1665,7 @@ def bf16_gemm_sm100(
     is_b_k_major = b.stride(-2) == 1
 
     runners = []
+    direct_runner = None
     if "cudnn" in runner_names:
         runners.append(
             _cudnn_gemm_bf16_runner(
@@ -1689,6 +1712,13 @@ def bf16_gemm_sm100(
         _BF16_GEMM_SM100_TUNING_CONFIG,
         inputs,
     )
+
+    if (
+        direct_runner is not None
+        and runner is direct_runner
+        and not direct_runner.is_tactic_compatible(inputs, tactic)
+    ):
+        runner, tactic = runners[0], -1
 
     runner(inputs=inputs, tactic=tactic)
 
@@ -7293,6 +7323,11 @@ def _check_bmm_fp8_problem_size(
     return True
 
 
+# One-shot guard so the SM12x cuDNN-skip warning fires once per process, not
+# on every ``bmm_fp8(backend="auto")`` call (the heuristic runs per-call).
+_CUDNN_SM12X_SKIP_LOGGED: set = set()
+
+
 def _heuristic_func_bmm_fp8(
     suitable_backends: List[str],
     A: torch.Tensor,
@@ -7329,7 +7364,20 @@ def _heuristic_func_bmm_fp8(
     if "cublas" in suitable_backends:
         heuristic_backends.append("cublas")
     if CUDNN_AVAILABLE and "cudnn" in suitable_backends:
-        heuristic_backends.append("cudnn")
+        # On SM12x without override_shape (cuDNN backend < 9.23.1), cuDNN's
+        # per-shape ``policy=ALL`` graph build is unbounded host-side work at
+        # serving time and its async CUDA fault escapes #3707's synchronous
+        # fallback. Gate it out; keep cublas/cutlass. See RFC #3920 rule 6.
+        if is_sm120_supported and not _is_cudnn_override_shape_available():
+            if "sm12x" not in _CUDNN_SM12X_SKIP_LOGGED:
+                _CUDNN_SM12X_SKIP_LOGGED.add("sm12x")
+                logger.warning(
+                    "Skipping cuDNN in bmm_fp8 auto candidates on SM12x: "
+                    "override_shape unavailable (cuDNN backend < 9.23.1); "
+                    "policy=ALL per-shape build is unbounded at serving time."
+                )
+        else:
+            heuristic_backends.append("cudnn")
 
     # CuTe-DSL backend is placed last (experimental)
     # Note: CuTe-DSL supports both Float8E4M3FN and Float8E5M2, but requires same dtype
