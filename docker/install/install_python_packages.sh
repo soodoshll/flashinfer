@@ -59,10 +59,12 @@ pip3 install --upgrade "$CUDA_PYTHON"
 # Install cudnn package based on CUDA version
 if [[ "$CUDA_VERSION" == *"cu13"* ]]; then
   pip3 install --upgrade nvidia-cudnn-cu13
-  # Rubin (sm_107a) needs the internal cute-dsl wheel; the public nvidia-cutlass-dsl
-  # fails JIT with `-arch=compute_a is an unsupported option`.
-  pip3 install --upgrade nvidia-cutlass-dsl-internal \
-    --extra-index-url https://urm.nvidia.com/artifactory/api/pypi/nv-shared-pypi-local/simple
+  # CuTe DSL is deliberately NOT installed here. requirements.txt (installed
+  # above) pins nvidia-cutlass-dsl[cu13]==4.8.0a0 from the 4.8 release branch
+  # and is the single source of truth. Do not layer another cutlass-dsl
+  # distribution on top: they share the nvidia_cutlass_dsl namespace with
+  # different on-disk layouts, so installing one over another leaves a
+  # half-populated namespace and breaks imports.
 else
   pip3 install --upgrade nvidia-cudnn-cu12
 fi

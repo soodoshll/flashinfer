@@ -1281,7 +1281,8 @@ class PersistentDenseGemmKernel:
                             tRS_sC[(None, None, None, c_buffer)],
                         )
                         # Fence and barrier to make sure shared memory store is visible to TMA store
-                        # Note: nvidia-cutlass-dsl-internal requires string literals instead of enums
+                        # Note: pass string literals here rather than enums - the CuTe
+                        # DSL build we pin rejects the enum form.
                         cute.arch.fence_proxy(
                             "async.shared",
                             space="cta",
