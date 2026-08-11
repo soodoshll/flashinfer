@@ -1413,9 +1413,9 @@ inline void CheckSm100Family(int device_id) {
             "cudaDeviceGetAttribute(compute capability major)");
   CheckCuda(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device_id),
             "cudaDeviceGetAttribute(compute capability minor)");
-  TVM_FFI_ICHECK(major == 10 && (minor == 0 || minor == 3))
-      << "tinygemm2_sm100 requires an SM100/SM103 (B200/B300 class) device, got sm_" << major
-      << minor;
+  TVM_FFI_ICHECK(major == 10 && (minor == 0 || minor == 3 || minor == 7))
+      << "tinygemm2_sm100 requires an SM100/SM103/SM107 (B200/B300/Rubin class) device, got sm_"
+      << major << minor;
 }
 
 inline void CheckBf16(const TensorView& t, const char* name) {
