@@ -249,6 +249,8 @@ def _get_compiled_gather_kernel(
     situ_linear_beta: Optional[float] = None,
     gated: bool = True,
     use_a_per_token_scale: bool = False,
+    # uGPU half-GEMM (Rubin only, compile-time - IN cache key)
+    ugpu_half_gemm: bool = False,
 ):
     """Get or compile the gather grouped GEMM with FC1 activation fusion.
 
@@ -286,6 +288,12 @@ def _get_compiled_gather_kernel(
         cluster_shape_mn,
         vectorized_f32,
         raster_along_m,
+        # uGPU half-GEMM is a kernel constexpr: True/False are distinct binaries.
+        (ugpu_half_gemm if is_rubin else False),
+        # max_active_clusters is a cute.compile constexpr sizing the persistent
+        # grid. Under a green context it is scaled to the node-local SM fraction,
+        # so the full-device and per-die variants must not alias.
+        max_active_clusters,
         enable_pdl,
         normalized_activation_type.value,
         swiglu_alpha,
@@ -332,6 +340,7 @@ def _get_compiled_gather_kernel(
                 vectorized_f32=vectorized_f32,
                 topk=topk,
                 raster_along_m=raster_along_m,
+                ugpu_half_gemm=ugpu_half_gemm,
                 enable_pdl=enable_pdl,
             )
         else:
@@ -391,6 +400,20 @@ def _get_compiled_gather_kernel(
             scaling_vector_size=sf_vec_size,
             max_active_clusters=max_active_clusters,
             stream=stream,
+            # The Rubin wrapper accepts trailing runtime Int64 c_stride_m /
+            # c_sf_n_tile_offset for the uGPU strided write; the Blackwell
+            # wrapper does not, so only pass them for Rubin. Traced with
+            # cutlass.Int64(0) -- the Int64 wrapping is what makes them runtime
+            # arguments; a bare Python 0 would trace as a constexpr and be baked
+            # in, silently ignoring the per-partition values at the call site.
+            **(
+                {
+                    "c_stride_m": cutlass.Int64(0),
+                    "c_sf_n_tile_offset": cutlass.Int64(0),
+                }
+                if is_rubin
+                else {}
+            ),
         )
 
         _gather_kernel_cache[cache_key] = compiled_gemm
@@ -423,6 +446,12 @@ def blockscaled_contiguous_gather_grouped_gemm_act_fusion_nvfp4(
     vectorized_f32: bool = True,
     raster_along_m: bool = False,
     sm_count: Optional[int] = None,
+    # uGPU half-GEMM (Rubin only): partition_id >= 0 makes this partition write
+    # its N-half (this die's slice of the intermediate dimension) into the
+    # caller-provided shared full-width `out` at a column offset, using a
+    # full-width row stride -- two dies fill one buffer with no copy-back and no
+    # reduction. partition_id < 0 -> normal contiguous output.
+    partition_id: int = -1,
     # Rubin-specific parameters (optional; when set, use SM107 kernel)
     mma_tiler: Optional[Tuple[int, int, int]] = None,
     mma_inst_shape: Optional[Tuple[int, int, int]] = None,
@@ -672,13 +701,56 @@ def blockscaled_contiguous_gather_grouped_gemm_act_fusion_nvfp4(
         )
 
     # Get SM count
+    total_sm = get_num_sm(a.device)
     if sm_count is None:
-        sm_count = get_num_sm(a.device)
+        sm_count = total_sm
 
     # Compute max active clusters (cached to avoid expensive HardwareInfo queries)
     max_active_clusters = get_max_active_clusters(
         cluster_shape_mn[0] * cluster_shape_mn[1]
     )
+    # get_max_active_clusters() is queried on the FULL device. When this launch is
+    # confined to a green-context partition (sm_count < total_sm), the persistent
+    # grid must be scaled to the node-local SM fraction or it oversizes and spills
+    # into an extra wave (the penalty grows with tile count). Mirrors TRT-LLM's
+    # node_local_max_active_clusters: max_active_full * node_sm // total_sm.
+    if sm_count < total_sm:
+        max_active_clusters = max(1, max_active_clusters * sm_count // total_sm)
+
+    # uGPU half-GEMM (Rubin only). Two dies each compute half of the N
+    # (intermediate) dimension and write into ONE caller-provided full-width
+    # out/out_scale: c_stride_m makes each die stride by the full row width while
+    # filling only its half, c_byte_offset moves this die to its column start, and
+    # c_sf_n_tile_offset does the same for the tiled SF buffer -- whose layout is
+    # indexed by subtile, so a byte offset would not work there. No copy-back and
+    # no reduction: the split is exact.
+    ugpu_half_gemm = partition_id >= 0
+    if ugpu_half_gemm:
+        if not is_rubin:
+            raise ValueError(
+                "uGPU half-GEMM (partition_id >= 0) is Rubin (SM107) only"
+            )
+        if partition_id >= 2:
+            raise ValueError(f"partition_id must be 0 or 1, got {partition_id}")
+        if not generate_sfc:
+            raise ValueError(
+                "uGPU half-GEMM requires the NVFP4 output path (generate_sfc): the "
+                "kernel derives its shared-SF full_c_shape from ugpu_half_gemm."
+            )
+        if out is None or out_scale is None:
+            raise ValueError(
+                "uGPU half-GEMM requires caller-provided full-width out/out_scale. "
+                "Both dies write into one shared buffer; a dispatcher-allocated one "
+                "would be private to this call and only half the required width."
+            )
+        c_stride_m_val = cutlass.Int64(out.shape[1] * 2)
+        c_sf_n_tile_offset_val = cutlass.Int64(partition_id * intermediate_size // 64)
+        # fp4 packs 2 values per byte, hence // 2 for this partition's column start.
+        c_data_ptr = out.data_ptr() + partition_id * intermediate_size // 2
+    else:
+        c_stride_m_val = cutlass.Int64(0)
+        c_sf_n_tile_offset_val = cutlass.Int64(0)
+        c_data_ptr = out.data_ptr()
 
     tile_size = mma_tiler[0] if is_rubin else mma_tiler_mn[0]
 
@@ -695,8 +767,10 @@ def blockscaled_contiguous_gather_grouped_gemm_act_fusion_nvfp4(
     b_sf_ptr = make_ptr(
         sf_dtype_cutlass, b_scale.data_ptr(), cute.AddressSpace.gmem, assumed_align=16
     )
+    # c_data_ptr carries this partition's column offset under uGPU (== out.data_ptr()
+    # otherwise).
     c_ptr = make_ptr(
-        c_dtype_cutlass, out.data_ptr(), cute.AddressSpace.gmem, assumed_align=32
+        c_dtype_cutlass, c_data_ptr, cute.AddressSpace.gmem, assumed_align=32
     )
 
     if generate_sfc:
@@ -781,6 +855,7 @@ def blockscaled_contiguous_gather_grouped_gemm_act_fusion_nvfp4(
         situ_linear_beta=situ_linear_beta,
         gated=gated,
         use_a_per_token_scale=use_a_per_token_scale,
+        ugpu_half_gemm=ugpu_half_gemm,
     )
 
     # Execute kernel with runtime parameters.
@@ -811,6 +886,17 @@ def blockscaled_contiguous_gather_grouped_gemm_act_fusion_nvfp4(
         k,
         num_experts,
         stream=stream,
+        # Rubin-only trailing runtime Int64s (both 0 outside uGPU, which the
+        # kernel reads as "natural contiguous output"). Must match the set traced
+        # at the compile site above.
+        **(
+            {
+                "c_stride_m": c_stride_m_val,
+                "c_sf_n_tile_offset": c_sf_n_tile_offset_val,
+            }
+            if is_rubin
+            else {}
+        ),
     )
 
     return out, out_scale if generate_sfc else None
