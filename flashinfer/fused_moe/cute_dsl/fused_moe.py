@@ -346,19 +346,37 @@ def _moe_core_impl(
                 "uGPU localization is Rubin (SM107) only; pass gemm1_mma_tiler / "
                 "gemm1_mma_inst_shape."
             )
+        from torch.cuda.green_contexts import execute_in_green_contexts
+
         # The shared GEMM1 output has to be allocated ABOVE the fan-out. Left to
         # the dispatcher, each die would allocate its own buffer, and would size it
         # from its own (half-width) weight -- whereas the point of the split is
         # that both dies fill ONE full-width buffer at different column offsets.
-        # Per-die w1 packs gate+up, so each die contributes shape[1] // 2 columns.
         permuted_m = permuted_idx_to_expanded_idx.shape[0]
         sf_vec_size = 16  # NVFP4
         # Captured before any fork: both fan-outs and the memset between them are
         # ordered against this stream.
         ugpu_main_stream = torch.cuda.current_stream()
+
+        n_per_die = ugpu_weights[0]["w1_weight"].shape[1]
+        if any(s["w1_weight"].shape[1] != n_per_die for s in ugpu_weights):
+            raise ValueError(
+                "uGPU shards must be equal width; got "
+                f"{[s['w1_weight'].shape[1] for s in ugpu_weights]}"
+            )
+        # Mirrors the dispatcher's own intermediate_size: a gated w1 packs gate+up,
+        # so each die contributes half its rows as output columns.
         ugpu_intermediate_size = len(ugpu_weights) * (
-            ugpu_weights[0]["w1_weight"].shape[1] // 2
+            n_per_die // (2 if gated else 1)
         )
+        # The scale-factor layout tiles M by 128 (see the dispatcher's own
+        # allocation, which this mirrors). A non-multiple would silently undersize
+        # a buffer that BOTH kernel launches write into.
+        if permuted_m % 128 != 0:
+            raise ValueError(
+                f"uGPU requires permuted_m ({permuted_m}) to be a multiple of 128 "
+                "for the shared scale-factor buffer"
+            )
         if gemm1_out is None:
             gemm1_out = torch.empty(
                 (permuted_m, ugpu_intermediate_size // 2),  # 2 fp4 per byte
@@ -416,9 +434,10 @@ def _moe_core_impl(
         # which segfaults.
         #
         # w1_alpha / fc2_input_scale are per-expert or global, invariant under a
-        # split on N, so both dies read the same unsharded tensors.
-        from torch.cuda.green_contexts import execute_in_green_contexts
-
+        # split on N, so both dies read the same unsharded tensors. output_kwargs
+        # is shared with the non-uGPU path below: localization forbids per-token
+        # activation, so it is always the blockscale variant here, carrying the
+        # shared gemm1_out_scale.
         def _fc1_die(i, _ctx):
             shard = ugpu_weights[i]
             blockscaled_contiguous_gather_grouped_gemm_act_fusion_nvfp4(
@@ -432,10 +451,7 @@ def _moe_core_impl(
                 token_id_mapping=permuted_idx_to_expanded_idx,
                 num_non_exiting_tiles=kernel_num_non_exiting_tiles,
                 out=gemm1_out,
-                out_scale=gemm1_out_scale,
-                global_scale=fc2_input_scale,
-                a_per_token_scale=None,
-                c_dtype="float4_e2m1fn",
+                **output_kwargs,
                 topk=top_k,
                 cluster_shape_mn=gemm1_cluster_shape_mn,
                 mma_tiler=gemm1_mma_tiler,
