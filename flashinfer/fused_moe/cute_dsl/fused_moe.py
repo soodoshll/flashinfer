@@ -169,6 +169,13 @@ def _moe_core_impl(
     gemm1_out_scale: Optional[torch.Tensor] = None,
     moe_output: Optional[torch.Tensor] = None,
     per_token_scale: Optional[torch.Tensor] = None,
+    # uGPU localization (Rubin only). When ugpu_weights is set, both GEMMs are
+    # split across the device's locality domains ("dies"): one dict of per-die
+    # weight shards per domain, one long-lived green-context stream per domain,
+    # and sm_count set to the PER-DIE SM count. See the fan-out below.
+    ugpu_weights: Optional[list] = None,
+    ugpu_streams: Optional[list] = None,
+    sm_count: Optional[int] = None,
     # Stream resources
     aux_stream: Optional[torch.cuda.Stream] = None,
     main_event: Optional[torch.cuda.Event] = None,
@@ -257,6 +264,32 @@ def _moe_core_impl(
     hidden_size = w2_weight.size(1)
     use_per_token_activation = per_token_scale is not None
 
+    # uGPU localization. Reject the paths the fan-out does not implement rather
+    # than silently diverging from them.
+    ugpu = ugpu_weights is not None
+    if ugpu:
+        if ugpu_streams is None or len(ugpu_streams) != len(ugpu_weights):
+            raise ValueError(
+                f"ugpu_weights ({len(ugpu_weights)} shards) needs one green-context "
+                f"stream per die, got "
+                f"{None if ugpu_streams is None else len(ugpu_streams)}"
+            )
+        if use_per_token_activation:
+            raise NotImplementedError(
+                "uGPU localization does not support per-token activation scales: "
+                "the Rubin gather kernel has no a_per_token_scale_ptr parameter."
+            )
+        if not use_fused_finalize:
+            raise NotImplementedError(
+                "uGPU localization requires use_fused_finalize=True; the "
+                "deterministic path's moe_unpermute reduction is not split-aware."
+            )
+        # The async memset runs on aux_stream and is ordered by explicit events.
+        # The fan-out below is ordered purely by execute_in_green_contexts'
+        # fork/join, and the two schemes do not compose: the FC2 fork orders
+        # against main_stream, so the zeroing has to be on main_stream too.
+        use_async_memset = False
+
     if moe_output is None:
         moe_output = torch.empty(
             (num_tokens, hidden_size),
@@ -307,6 +340,45 @@ def _moe_core_impl(
     else:
         kernel_num_non_exiting_tiles = num_non_exiting_tiles
 
+    if ugpu:
+        if not is_rubin:
+            raise NotImplementedError(
+                "uGPU localization is Rubin (SM107) only; pass gemm1_mma_tiler / "
+                "gemm1_mma_inst_shape."
+            )
+        # The shared GEMM1 output has to be allocated ABOVE the fan-out. Left to
+        # the dispatcher, each die would allocate its own buffer, and would size it
+        # from its own (half-width) weight -- whereas the point of the split is
+        # that both dies fill ONE full-width buffer at different column offsets.
+        # Per-die w1 packs gate+up, so each die contributes shape[1] // 2 columns.
+        permuted_m = permuted_idx_to_expanded_idx.shape[0]
+        sf_vec_size = 16  # NVFP4
+        # Captured before any fork: both fan-outs and the memset between them are
+        # ordered against this stream.
+        ugpu_main_stream = torch.cuda.current_stream()
+        ugpu_intermediate_size = len(ugpu_weights) * (
+            ugpu_weights[0]["w1_weight"].shape[1] // 2
+        )
+        if gemm1_out is None:
+            gemm1_out = torch.empty(
+                (permuted_m, ugpu_intermediate_size // 2),  # 2 fp4 per byte
+                dtype=torch.uint8,
+                device=x.device,
+            )
+        if gemm1_out_scale is None:
+            gemm1_out_scale = torch.empty(
+                (
+                    32,
+                    4,
+                    permuted_m // 128,
+                    4,
+                    (ugpu_intermediate_size // sf_vec_size) // 4,
+                    1,
+                ),
+                dtype=torch.uint8,
+                device=x.device,
+            )
+
     # Record event for async memset synchronization
     if use_async_memset and use_fused_finalize:
         main_event.record()
@@ -329,34 +401,88 @@ def _moe_core_impl(
         }
     )
     intermediate_per_token_scale = None
-    intermediate, intermediate_sf = (
-        blockscaled_contiguous_gather_grouped_gemm_act_fusion_nvfp4(
-            a=x,
-            b=w1_weight,
-            a_scale=x_sf,
-            b_scale=w1_weight_sf,
-            alpha=w1_alpha,
-            tile_idx_to_expert_idx=tile_idx_to_expert_idx,
-            tile_idx_to_mn_limit=tile_idx_to_mn_limit,
-            token_id_mapping=permuted_idx_to_expanded_idx,
-            num_non_exiting_tiles=kernel_num_non_exiting_tiles,
-            out=gemm1_out,
-            **output_kwargs,
-            topk=top_k,
-            mma_tiler_mn=gemm1_mma_tiler_mn,
-            cluster_shape_mn=gemm1_cluster_shape_mn,
-            mma_tiler=gemm1_mma_tiler,
-            mma_inst_shape=gemm1_mma_inst_shape,
-            enable_pdl=enable_pdl,
-            activation_type=activation.value,
-            swiglu_alpha=swiglu_alpha,
-            swiglu_beta=swiglu_beta,
-            swiglu_limit=swiglu_limit,
-            situ_beta=situ_beta,
-            situ_linear_beta=situ_linear_beta,
-            gated=gated,
+    if ugpu:
+        # Fan out over the dies. execute_in_green_contexts forks the current
+        # stream to the per-die green-context streams, runs the callback on each,
+        # and joins them back on return -- so this is both a barrier against the
+        # moe_sort above and against every later reader of gemm1_out, with no
+        # explicit events, and it still captures into a CUDA graph.
+        #
+        # Do NOT call record_stream(green_stream) on any of these buffers. The
+        # join already orders later frees/reuse on the main stream, so it is
+        # redundant -- and harmful: it adds the green streams to the block's
+        # use-set, so at teardown the caching allocator's free() tries to
+        # cudaEventRecord on a stream whose GreenContext is already collected,
+        # which segfaults.
+        #
+        # w1_alpha / fc2_input_scale are per-expert or global, invariant under a
+        # split on N, so both dies read the same unsharded tensors.
+        from torch.cuda.green_contexts import execute_in_green_contexts
+
+        def _fc1_die(i, _ctx):
+            shard = ugpu_weights[i]
+            blockscaled_contiguous_gather_grouped_gemm_act_fusion_nvfp4(
+                a=x,
+                b=shard["w1_weight"],
+                a_scale=x_sf,
+                b_scale=shard["w1_weight_sf"],
+                alpha=w1_alpha,
+                tile_idx_to_expert_idx=tile_idx_to_expert_idx,
+                tile_idx_to_mn_limit=tile_idx_to_mn_limit,
+                token_id_mapping=permuted_idx_to_expanded_idx,
+                num_non_exiting_tiles=kernel_num_non_exiting_tiles,
+                out=gemm1_out,
+                out_scale=gemm1_out_scale,
+                global_scale=fc2_input_scale,
+                a_per_token_scale=None,
+                c_dtype="float4_e2m1fn",
+                topk=top_k,
+                cluster_shape_mn=gemm1_cluster_shape_mn,
+                mma_tiler=gemm1_mma_tiler,
+                mma_inst_shape=gemm1_mma_inst_shape,
+                sm_count=sm_count,
+                partition_id=i,
+                enable_pdl=enable_pdl,
+                activation_type=activation.value,
+                swiglu_alpha=swiglu_alpha,
+                swiglu_beta=swiglu_beta,
+                swiglu_limit=swiglu_limit,
+                situ_beta=situ_beta,
+                situ_linear_beta=situ_linear_beta,
+                gated=gated,
+            )
+
+        execute_in_green_contexts(ugpu_streams, _fc1_die)
+        intermediate, intermediate_sf = gemm1_out, gemm1_out_scale
+    else:
+        intermediate, intermediate_sf = (
+            blockscaled_contiguous_gather_grouped_gemm_act_fusion_nvfp4(
+                a=x,
+                b=w1_weight,
+                a_scale=x_sf,
+                b_scale=w1_weight_sf,
+                alpha=w1_alpha,
+                tile_idx_to_expert_idx=tile_idx_to_expert_idx,
+                tile_idx_to_mn_limit=tile_idx_to_mn_limit,
+                token_id_mapping=permuted_idx_to_expanded_idx,
+                num_non_exiting_tiles=kernel_num_non_exiting_tiles,
+                out=gemm1_out,
+                **output_kwargs,
+                topk=top_k,
+                mma_tiler_mn=gemm1_mma_tiler_mn,
+                cluster_shape_mn=gemm1_cluster_shape_mn,
+                mma_tiler=gemm1_mma_tiler,
+                mma_inst_shape=gemm1_mma_inst_shape,
+                enable_pdl=enable_pdl,
+                activation_type=activation.value,
+                swiglu_alpha=swiglu_alpha,
+                swiglu_beta=swiglu_beta,
+                swiglu_limit=swiglu_limit,
+                situ_beta=situ_beta,
+                situ_linear_beta=situ_linear_beta,
+                gated=gated,
+            )
         )
-    )
     if use_per_token_activation:
         intermediate, intermediate_sf, intermediate_per_token_scale = (
             nvfp4_quantize_per_token_cute_dsl(
@@ -383,6 +509,12 @@ def _moe_core_impl(
                 moe_output_memset_inplace(moe_output)
                 memset_event.record()
             memset_event.wait()
+        elif ugpu:
+            # Pin to the main stream explicitly. The FC2 fan-out below forks from
+            # it, so "every die sees a zeroed output" must not depend on
+            # execute_in_green_contexts' stream-restoration behaviour.
+            with torch.cuda.stream(ugpu_main_stream):
+                moe_output_memset_inplace(moe_output)
         else:
             moe_output_memset_inplace(moe_output)
         gemm2_output = moe_output
@@ -394,26 +526,58 @@ def _moe_core_impl(
         )
 
     # Step 3: GEMM2 with optional atomic finalize
-    blockscaled_contiguous_grouped_gemm_finalize_fusion_nvfp4(
-        a=intermediate,
-        b=w2_weight,
-        a_scale=intermediate_sf,
-        b_scale=w2_weight_sf,
-        alpha=w2_alpha,
-        tile_idx_to_expert_idx=tile_idx_to_expert_idx,
-        num_non_exiting_tiles=kernel_num_non_exiting_tiles,
-        tile_idx_to_mn_limit=tile_idx_to_mn_limit,
-        permuted_idx_to_expanded_idx=permuted_idx_to_expanded_idx,
-        token_final_scales=token_final_scales,
-        out=gemm2_output,
-        a_per_token_scale=intermediate_per_token_scale,
-        mma_tiler_mn=gemm2_mma_tiler_mn,
-        cluster_shape_mn=gemm2_cluster_shape_mn,
-        mma_tiler=gemm2_mma_tiler,
-        mma_inst_shape=gemm2_mma_inst_shape,
-        enable_pdl=enable_pdl,
-        use_fused_finalize=use_fused_finalize,
-    )
+    if ugpu:
+        # Each die reads the FULL assembled intermediate and writes its own
+        # disjoint half of the hidden output columns, so the contraction is
+        # complete on each side and no cross-die reduction is needed. The fork
+        # orders every die after both the joined FC1 and the zeroing above; the
+        # join on return means gemm2_output is complete for the caller.
+        def _fc2_die(i, _ctx):
+            shard = ugpu_weights[i]
+            blockscaled_contiguous_grouped_gemm_finalize_fusion_nvfp4(
+                a=intermediate,
+                b=shard["w2_weight"],
+                a_scale=intermediate_sf,
+                b_scale=shard["w2_weight_sf"],
+                alpha=w2_alpha,
+                tile_idx_to_expert_idx=tile_idx_to_expert_idx,
+                num_non_exiting_tiles=kernel_num_non_exiting_tiles,
+                tile_idx_to_mn_limit=tile_idx_to_mn_limit,
+                permuted_idx_to_expanded_idx=permuted_idx_to_expanded_idx,
+                token_final_scales=token_final_scales,
+                out=gemm2_output,
+                a_per_token_scale=None,
+                cluster_shape_mn=gemm2_cluster_shape_mn,
+                mma_tiler=gemm2_mma_tiler,
+                mma_inst_shape=gemm2_mma_inst_shape,
+                sm_count=sm_count,
+                ugpu_id=i,
+                enable_pdl=enable_pdl,
+                use_fused_finalize=use_fused_finalize,
+            )
+
+        execute_in_green_contexts(ugpu_streams, _fc2_die)
+    else:
+        blockscaled_contiguous_grouped_gemm_finalize_fusion_nvfp4(
+            a=intermediate,
+            b=w2_weight,
+            a_scale=intermediate_sf,
+            b_scale=w2_weight_sf,
+            alpha=w2_alpha,
+            tile_idx_to_expert_idx=tile_idx_to_expert_idx,
+            num_non_exiting_tiles=kernel_num_non_exiting_tiles,
+            tile_idx_to_mn_limit=tile_idx_to_mn_limit,
+            permuted_idx_to_expanded_idx=permuted_idx_to_expanded_idx,
+            token_final_scales=token_final_scales,
+            out=gemm2_output,
+            a_per_token_scale=intermediate_per_token_scale,
+            mma_tiler_mn=gemm2_mma_tiler_mn,
+            cluster_shape_mn=gemm2_cluster_shape_mn,
+            mma_tiler=gemm2_mma_tiler,
+            mma_inst_shape=gemm2_mma_inst_shape,
+            enable_pdl=enable_pdl,
+            use_fused_finalize=use_fused_finalize,
+        )
 
     # Step 4: Deterministic routing-weight reduction
     if not use_fused_finalize:
@@ -947,6 +1111,9 @@ def _cute_dsl_fused_moe_nvfp4_impl(
     swiglu_limit: float = DEFAULT_SWIGLU_LIMIT,
     situ_beta: Optional[float] = None,
     situ_linear_beta: Optional[float] = None,
+    ugpu_weights: Optional[list] = None,
+    ugpu_streams: Optional[list] = None,
+    sm_count: Optional[int] = None,
 ) -> torch.Tensor:
     """Internal implementation called by auto-tuner for functional API."""
     return _moe_core_impl(
@@ -987,6 +1154,9 @@ def _cute_dsl_fused_moe_nvfp4_impl(
         swiglu_limit=swiglu_limit,
         situ_beta=situ_beta,
         situ_linear_beta=situ_linear_beta,
+        ugpu_weights=ugpu_weights,
+        ugpu_streams=ugpu_streams,
+        sm_count=sm_count,
     )
 
 
@@ -1022,6 +1192,11 @@ def cute_dsl_fused_moe_nvfp4(
     *,
     quant_mode: str = "w4a4",
     per_token_scale: Optional[torch.Tensor] = None,
+    # uGPU localization (Rubin NVFP4 only). One weight-shard dict and one
+    # green-context stream per locality domain, plus the PER-DIE SM count.
+    ugpu_weights: Optional[list] = None,
+    ugpu_streams: Optional[list] = None,
+    ugpu_sm_count: Optional[int] = None,
 ) -> torch.Tensor:
     r"""Run a fused MoE forward pass using the CuTe-DSL NVFP4 kernels.
 
@@ -1218,6 +1393,18 @@ def cute_dsl_fused_moe_nvfp4(
     runner_kwargs = {"aux_stream": aux_stream}
     if quant_mode != "w4a16":
         runner_kwargs["use_async_memset"] = not tuner.is_tuning_mode
+        if ugpu_weights is not None:
+            # Only the final call is localized. tuner.choose_one() above probes
+            # tactics through the ordinary full-width path, which keeps tactic
+            # selection independent of the split.
+            runner_kwargs["ugpu_weights"] = ugpu_weights
+            runner_kwargs["ugpu_streams"] = ugpu_streams
+            runner_kwargs["sm_count"] = ugpu_sm_count
+    elif ugpu_weights is not None:
+        raise NotImplementedError(
+            "uGPU localization is implemented for the NVFP4 (w4a4) path only, "
+            f"got quant_mode={quant_mode!r}."
+        )
     return runner(inputs, tactic=best_tactic, **runner_kwargs)
 
 
