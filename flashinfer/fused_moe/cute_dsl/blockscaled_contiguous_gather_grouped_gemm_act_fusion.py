@@ -48,6 +48,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import cutlass
 import cutlass.cute as cute
+
+from .ugpu_debug import ugpu_trace
 import cuda.bindings.driver as cuda
 import torch
 
@@ -714,6 +716,7 @@ def blockscaled_contiguous_gather_grouped_gemm_act_fusion_nvfp4(
     # grid must be scaled to the node-local SM fraction or it oversizes and spills
     # into an extra wave (the penalty grows with tile count). Mirrors TRT-LLM's
     # node_local_max_active_clusters: max_active_full * node_sm // total_sm.
+    max_active_clusters_full = max_active_clusters
     if sm_count < total_sm:
         max_active_clusters = max(1, max_active_clusters * sm_count // total_sm)
 
@@ -751,6 +754,18 @@ def blockscaled_contiguous_gather_grouped_gemm_act_fusion_nvfp4(
         c_stride_m_val = cutlass.Int64(0)
         c_sf_n_tile_offset_val = cutlass.Int64(0)
         c_data_ptr = out.data_ptr()
+
+    ugpu_trace(
+        f"fc1-p{partition_id}",
+        f"FC1 partition_id={partition_id} ugpu_half_gemm={ugpu_half_gemm} "
+        f"is_rubin={is_rubin} | b.shape[1]={n} intermediate_size={intermediate_size} "
+        f"out.shape={tuple(out.shape)} permuted_m={permuted_m} | "
+        f"sm_count={sm_count}/{total_sm} "
+        f"max_active_clusters={max_active_clusters_full}->{max_active_clusters} | "
+        f"c_stride_m={int(c_stride_m_val)} "
+        f"c_sf_n_tile_offset={int(c_sf_n_tile_offset_val)} "
+        f"c_byte_offset={c_data_ptr - out.data_ptr()}",
+    )
 
     tile_size = mma_tiler[0] if is_rubin else mma_tiler_mn[0]
 

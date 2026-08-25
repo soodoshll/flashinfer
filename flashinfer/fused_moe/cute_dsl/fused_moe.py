@@ -69,6 +69,7 @@ from ...tllm_enums import (
 )
 from ...autotuner import AutoTuner
 from ...cute_dsl.utils import convert_sf_to_mma_layout
+from .ugpu_debug import ugpu_trace
 from ...cute_dsl.utils import require_cute_dsl_arch as _require_cute_dsl_arch_for
 from ...quantization.kernels.nvfp4_quantize import (
     SF_LAYOUT_128x4,
@@ -468,6 +469,17 @@ def _moe_core_impl(
                 gated=gated,
             )
 
+        ugpu_trace(
+            "core",
+            f"_moe_core_impl UGPU branch: dies={len(ugpu_weights)} "
+            f"sm_count={sm_count} streams={len(ugpu_streams)} | "
+            f"per-die w1={tuple(ugpu_weights[0]['w1_weight'].shape)} "
+            f"w2={tuple(ugpu_weights[0]['w2_weight'].shape)} | "
+            f"shared gemm1_out={tuple(gemm1_out.shape)} "
+            f"gemm1_out_scale={tuple(gemm1_out_scale.shape)} "
+            f"intermediate_size={ugpu_intermediate_size} permuted_m={permuted_m} | "
+            f"async_memset={use_async_memset} fused_finalize={use_fused_finalize}",
+        )
         execute_in_green_contexts(ugpu_streams, _fc1_die)
         intermediate, intermediate_sf = gemm1_out, gemm1_out_scale
     else:
