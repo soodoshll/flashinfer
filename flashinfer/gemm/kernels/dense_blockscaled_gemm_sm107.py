@@ -925,7 +925,7 @@ class Sm107BlockScaledPersistentDenseGemmKernel(Sm100BlockScaledPersistentDenseG
         b_layout = cute.make_ordered_layout((n, cute.assume(k, 32), l), order=(0, 1, 2))
         if cutlass.const_expr(self.b_major_mode == OperandMajorMode.K):
             b_layout = cute.make_ordered_layout((cute.assume(n, 32), k, l), order=(1, 0, 2))
-        # c supports strided output for uGPU shared buffers.
+        # c supports strided output for locality-domain shared buffers.
         # c_ld: leading dimension (0 = use default contiguous layout).
         if cutlass.const_expr(self.c_layout == utils.LayoutEnum.ROW_MAJOR):
             actual_c_ld = c_ld + (n - c_ld) * (c_ld == 0)
@@ -2825,7 +2825,7 @@ class Sm107BlockScaledPersistentDenseGemmMixedClustersKernel(
         b_layout = cute.make_ordered_layout((n, cute.assume(k, 32), l), order=(0, 1, 2))
         if cutlass.const_expr(self.b_major_mode == OperandMajorMode.K):
             b_layout = cute.make_ordered_layout((cute.assume(n, 32), k, l), order=(1, 0, 2))
-        # c supports strided output for uGPU shared buffers.
+        # c supports strided output for locality-domain shared buffers.
         # c_ld: leading dimension (0 = use default contiguous layout).
         if cutlass.const_expr(self.c_layout == utils.LayoutEnum.ROW_MAJOR):
             actual_c_ld = c_ld + (n - c_ld) * (c_ld == 0)

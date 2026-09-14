@@ -69,7 +69,7 @@ from ...tllm_enums import (
 )
 from ...autotuner import AutoTuner
 from ...cute_dsl.utils import convert_sf_to_mma_layout
-from .ugpu_debug import ugpu_trace
+from .localized_moe_debug import localized_moe_trace
 from ...cute_dsl.utils import require_cute_dsl_arch as _require_cute_dsl_arch_for
 from ...quantization.kernels.nvfp4_quantize import (
     SF_LAYOUT_128x4,
@@ -170,12 +170,13 @@ def _moe_core_impl(
     gemm1_out_scale: Optional[torch.Tensor] = None,
     moe_output: Optional[torch.Tensor] = None,
     per_token_scale: Optional[torch.Tensor] = None,
-    # uGPU localization (Rubin only). When ugpu_weights is set, both GEMMs are
+    # locality-domain localization (Rubin only). When localized_weights is set, both GEMMs are
     # split across the device's locality domains ("dies"): one dict of per-die
     # weight shards per domain, one long-lived green-context stream per domain,
     # and sm_count set to the PER-DIE SM count. See the fan-out below.
-    ugpu_weights: Optional[list] = None,
-    ugpu_streams: Optional[list] = None,
+    localized_memset_stream: Optional[torch.cuda.Stream] = None,
+    localized_weights: Optional[list] = None,
+    localized_streams: Optional[list] = None,
     sm_count: Optional[int] = None,
     # Stream resources
     aux_stream: Optional[torch.cuda.Stream] = None,
@@ -265,30 +266,31 @@ def _moe_core_impl(
     hidden_size = w2_weight.size(1)
     use_per_token_activation = per_token_scale is not None
 
-    # uGPU localization. Reject the paths the fan-out does not implement rather
+    # locality-domain localization. Reject the paths the fan-out does not implement rather
     # than silently diverging from them.
-    ugpu = ugpu_weights is not None
-    if ugpu:
-        if ugpu_streams is None or len(ugpu_streams) != len(ugpu_weights):
+    use_localized_path = localized_weights is not None
+    if use_localized_path:
+        if localized_streams is None or len(localized_streams) != len(
+            localized_weights
+        ):
             raise ValueError(
-                f"ugpu_weights ({len(ugpu_weights)} shards) needs one green-context "
+                f"localized_weights ({len(localized_weights)} shards) needs one green-context "
                 f"stream per die, got "
-                f"{None if ugpu_streams is None else len(ugpu_streams)}"
+                f"{None if localized_streams is None else len(localized_streams)}"
             )
         if use_per_token_activation:
             raise NotImplementedError(
-                "uGPU localization does not support per-token activation scales: "
+                "locality-domain localization does not support per-token activation scales: "
                 "the Rubin gather kernel has no a_per_token_scale_ptr parameter."
             )
         if not use_fused_finalize:
             raise NotImplementedError(
-                "uGPU localization requires use_fused_finalize=True; the "
+                "locality-domain localization requires use_fused_finalize=True; the "
                 "deterministic path's moe_unpermute reduction is not split-aware."
             )
-        # The async memset runs on aux_stream and is ordered by explicit events.
-        # The fan-out below is ordered purely by execute_in_green_contexts'
-        # fork/join, and the two schemes do not compose: the FC2 fork orders
-        # against main_stream, so the zeroing has to be on main_stream too.
+        # The generic async-memset path cannot be composed with the localized
+        # fork/join. The localized path orders its optional memset stream
+        # explicitly below.
         use_async_memset = False
 
     if moe_output is None:
@@ -341,10 +343,10 @@ def _moe_core_impl(
     else:
         kernel_num_non_exiting_tiles = num_non_exiting_tiles
 
-    if ugpu:
+    if use_localized_path:
         if not is_rubin:
             raise NotImplementedError(
-                "uGPU localization is Rubin (SM107) only; pass gemm1_mma_tiler / "
+                "locality-domain localization is Rubin (SM107) only; pass gemm1_mma_tiler / "
                 "gemm1_mma_inst_shape."
             )
         from torch.cuda.green_contexts import execute_in_green_contexts
@@ -357,17 +359,17 @@ def _moe_core_impl(
         sf_vec_size = 16  # NVFP4
         # Captured before any fork: both fan-outs and the memset between them are
         # ordered against this stream.
-        ugpu_main_stream = torch.cuda.current_stream()
+        localization_main_stream = torch.cuda.current_stream()
 
-        n_per_die = ugpu_weights[0]["w1_weight"].shape[1]
-        if any(s["w1_weight"].shape[1] != n_per_die for s in ugpu_weights):
+        n_per_die = localized_weights[0]["w1_weight"].shape[1]
+        if any(s["w1_weight"].shape[1] != n_per_die for s in localized_weights):
             raise ValueError(
-                "uGPU shards must be equal width; got "
-                f"{[s['w1_weight'].shape[1] for s in ugpu_weights]}"
+                "locality-domain shards must be equal width; got "
+                f"{[s['w1_weight'].shape[1] for s in localized_weights]}"
             )
         # Mirrors the dispatcher's own intermediate_size: a gated w1 packs gate+up,
         # so each die contributes half its rows as output columns.
-        ugpu_intermediate_size = len(ugpu_weights) * (
+        localized_intermediate_size = len(localized_weights) * (
             n_per_die // (2 if gated else 1)
         )
         # The scale-factor layout tiles M by 128 (see the dispatcher's own
@@ -375,12 +377,12 @@ def _moe_core_impl(
         # a buffer that BOTH kernel launches write into.
         if permuted_m % 128 != 0:
             raise ValueError(
-                f"uGPU requires permuted_m ({permuted_m}) to be a multiple of 128 "
+                f"locality-domain mode requires permuted_m ({permuted_m}) to be a multiple of 128 "
                 "for the shared scale-factor buffer"
             )
         if gemm1_out is None:
             gemm1_out = torch.empty(
-                (permuted_m, ugpu_intermediate_size // 2),  # 2 fp4 per byte
+                (permuted_m, localized_intermediate_size // 2),  # 2 fp4 per byte
                 dtype=torch.uint8,
                 device=x.device,
             )
@@ -391,7 +393,7 @@ def _moe_core_impl(
                     4,
                     permuted_m // 128,
                     4,
-                    (ugpu_intermediate_size // sf_vec_size) // 4,
+                    (localized_intermediate_size // sf_vec_size) // 4,
                     1,
                 ),
                 dtype=torch.uint8,
@@ -420,7 +422,7 @@ def _moe_core_impl(
         }
     )
     intermediate_per_token_scale = None
-    if ugpu:
+    if use_localized_path:
         # Fan out over the dies. execute_in_green_contexts forks the current
         # stream to the per-die green-context streams, runs the callback on each,
         # and joins them back on return -- so this is both a barrier against the
@@ -436,11 +438,11 @@ def _moe_core_impl(
         #
         # w1_alpha / fc2_input_scale are per-expert or global, invariant under a
         # split on N, so both dies read the same unsharded tensors. output_kwargs
-        # is shared with the non-uGPU path below: localization forbids per-token
+        # is shared with the non-localized path below: localization forbids per-token
         # activation, so it is always the blockscale variant here, carrying the
         # shared gemm1_out_scale.
         def _fc1_die(i, _ctx):
-            shard = ugpu_weights[i]
+            shard = localized_weights[i]
             blockscaled_contiguous_gather_grouped_gemm_act_fusion_nvfp4(
                 a=x,
                 b=shard["w1_weight"],
@@ -469,18 +471,28 @@ def _moe_core_impl(
                 gated=gated,
             )
 
-        ugpu_trace(
+        localized_memset_done = None
+        if use_fused_finalize and localized_memset_stream is not None:
+            localized_memset_done = torch.cuda.Event()
+            localized_memset_stream.wait_stream(localization_main_stream)
+            with torch.cuda.stream(localized_memset_stream):
+                moe_output_memset_inplace(moe_output)
+                localized_memset_done.record(localized_memset_stream)
+
+        localized_moe_trace(
             "core",
-            f"_moe_core_impl UGPU branch: dies={len(ugpu_weights)} "
-            f"sm_count={sm_count} streams={len(ugpu_streams)} | "
-            f"per-die w1={tuple(ugpu_weights[0]['w1_weight'].shape)} "
-            f"w2={tuple(ugpu_weights[0]['w2_weight'].shape)} | "
+            f"_moe_core_impl locality-domain branch: dies={len(localized_weights)} "
+            f"sm_count={sm_count} streams={len(localized_streams)} | "
+            f"per-die w1={tuple(localized_weights[0]['w1_weight'].shape)} "
+            f"w2={tuple(localized_weights[0]['w2_weight'].shape)} | "
             f"shared gemm1_out={tuple(gemm1_out.shape)} "
             f"gemm1_out_scale={tuple(gemm1_out_scale.shape)} "
-            f"intermediate_size={ugpu_intermediate_size} permuted_m={permuted_m} | "
+            f"intermediate_size={localized_intermediate_size} permuted_m={permuted_m} | "
             f"async_memset={use_async_memset} fused_finalize={use_fused_finalize}",
         )
-        execute_in_green_contexts(ugpu_streams, _fc1_die)
+        execute_in_green_contexts(localized_streams, _fc1_die)
+        if localized_memset_done is not None:
+            localization_main_stream.wait_event(localized_memset_done)
         intermediate, intermediate_sf = gemm1_out, gemm1_out_scale
     else:
         intermediate, intermediate_sf = (
@@ -537,12 +549,12 @@ def _moe_core_impl(
                 moe_output_memset_inplace(moe_output)
                 memset_event.record()
             memset_event.wait()
-        elif ugpu:
-            # Pin to the main stream explicitly. The FC2 fan-out below forks from
-            # it, so "every die sees a zeroed output" must not depend on
-            # execute_in_green_contexts' stream-restoration behaviour.
-            with torch.cuda.stream(ugpu_main_stream):
-                moe_output_memset_inplace(moe_output)
+        elif use_localized_path:
+            if localized_memset_done is None:
+                # Pin to the main stream explicitly. The FC2 fan-out below forks
+                # from it, so every die observes the zeroed output.
+                with torch.cuda.stream(localization_main_stream):
+                    moe_output_memset_inplace(moe_output)
         else:
             moe_output_memset_inplace(moe_output)
         gemm2_output = moe_output
@@ -554,14 +566,14 @@ def _moe_core_impl(
         )
 
     # Step 3: GEMM2 with optional atomic finalize
-    if ugpu:
+    if use_localized_path:
         # Each die reads the FULL assembled intermediate and writes its own
         # disjoint half of the hidden output columns, so the contraction is
         # complete on each side and no cross-die reduction is needed. The fork
         # orders every die after both the joined FC1 and the zeroing above; the
         # join on return means gemm2_output is complete for the caller.
         def _fc2_die(i, _ctx):
-            shard = ugpu_weights[i]
+            shard = localized_weights[i]
             blockscaled_contiguous_grouped_gemm_finalize_fusion_nvfp4(
                 a=intermediate,
                 b=shard["w2_weight"],
@@ -579,12 +591,12 @@ def _moe_core_impl(
                 mma_tiler=gemm2_mma_tiler,
                 mma_inst_shape=gemm2_mma_inst_shape,
                 sm_count=sm_count,
-                ugpu_id=i,
+                domain_id=i,
                 enable_pdl=enable_pdl,
                 use_fused_finalize=use_fused_finalize,
             )
 
-        execute_in_green_contexts(ugpu_streams, _fc2_die)
+        execute_in_green_contexts(localized_streams, _fc2_die)
     else:
         blockscaled_contiguous_grouped_gemm_finalize_fusion_nvfp4(
             a=intermediate,
@@ -1139,8 +1151,9 @@ def _cute_dsl_fused_moe_nvfp4_impl(
     swiglu_limit: float = DEFAULT_SWIGLU_LIMIT,
     situ_beta: Optional[float] = None,
     situ_linear_beta: Optional[float] = None,
-    ugpu_weights: Optional[list] = None,
-    ugpu_streams: Optional[list] = None,
+    localized_memset_stream: Optional[torch.cuda.Stream] = None,
+    localized_weights: Optional[list] = None,
+    localized_streams: Optional[list] = None,
     sm_count: Optional[int] = None,
 ) -> torch.Tensor:
     """Internal implementation called by auto-tuner for functional API."""
@@ -1182,8 +1195,9 @@ def _cute_dsl_fused_moe_nvfp4_impl(
         swiglu_limit=swiglu_limit,
         situ_beta=situ_beta,
         situ_linear_beta=situ_linear_beta,
-        ugpu_weights=ugpu_weights,
-        ugpu_streams=ugpu_streams,
+        localized_memset_stream=localized_memset_stream,
+        localized_weights=localized_weights,
+        localized_streams=localized_streams,
         sm_count=sm_count,
     )
 
@@ -1220,11 +1234,14 @@ def cute_dsl_fused_moe_nvfp4(
     *,
     quant_mode: str = "w4a4",
     per_token_scale: Optional[torch.Tensor] = None,
-    # uGPU localization (Rubin NVFP4 only). One weight-shard dict and one
+    # locality-domain localization (Rubin NVFP4 only). One weight-shard dict and one
     # green-context stream per locality domain, plus the PER-DIE SM count.
-    ugpu_weights: Optional[list] = None,
-    ugpu_streams: Optional[list] = None,
-    ugpu_sm_count: Optional[int] = None,
+    localized_weights: Optional[list] = None,
+    localized_streams: Optional[list] = None,
+    localized_sm_count: Optional[int] = None,
+    localized_memset_stream: Optional[torch.cuda.Stream] = None,
+    localized_allow_nonlocalized: bool = False,
+    autotune_use_cuda_graph: bool = False,
 ) -> torch.Tensor:
     r"""Run a fused MoE forward pass using the CuTe-DSL NVFP4 kernels.
 
@@ -1302,6 +1319,11 @@ def cute_dsl_fused_moe_nvfp4(
         Optional SiTU tanh clamp for the up branch.
     per_token_scale : Optional[torch.Tensor]
         Optional W4A4 per-token input row scale for GEMM1.
+    localized_allow_nonlocalized : bool
+        Include the full-width path in autotuning when localized weights are
+        supplied. The caller must retain usable full-width weights.
+    autotune_use_cuda_graph : bool
+        Profile tactics through CUDA Graph replay.
 
     Returns
     -------
@@ -1327,11 +1349,20 @@ def cute_dsl_fused_moe_nvfp4(
         )
 
     tuner = AutoTuner.get()
-    runner: CuteDslFusedMoENvfp4Runner | CuteDslFusedMoEW4A16Runner
+    runners: list[CuteDslFusedMoENvfp4Runner | CuteDslFusedMoEW4A16Runner]
 
     if quant_mode in ("nvfp4", "w4a4"):
         use_per_token_activation = per_token_scale is not None
-        runner = CuteDslFusedMoENvfp4Runner(
+        if localized_weights is not None and use_per_token_activation:
+            raise NotImplementedError(
+                "locality-domain localization does not support per-token "
+                "activation scales"
+            )
+        if localized_weights is not None and not use_fused_finalize:
+            raise NotImplementedError(
+                "locality-domain localization requires use_fused_finalize=True"
+            )
+        runner_kwargs = dict(
             forward_impl=_cute_dsl_fused_moe_nvfp4_impl,
             num_experts=num_experts,
             top_k=top_k,
@@ -1347,7 +1378,21 @@ def cute_dsl_fused_moe_nvfp4(
             situ_beta=situ_beta,
             situ_linear_beta=situ_linear_beta,
             use_per_token_activation=use_per_token_activation,
+            use_cuda_graph=autotune_use_cuda_graph,
         )
+        if localized_weights is None:
+            runners = [CuteDslFusedMoENvfp4Runner(**runner_kwargs)]
+        else:
+            localized_runner = CuteDslFusedMoENvfp4Runner(
+                **runner_kwargs,
+                localized_weights=localized_weights,
+                localized_streams=localized_streams,
+                localized_sm_count=localized_sm_count,
+                localized_memset_stream=localized_memset_stream,
+            )
+            runners = [localized_runner]
+            if localized_allow_nonlocalized:
+                runners.append(CuteDslFusedMoENvfp4Runner(**runner_kwargs))
 
         inputs = [
             x,
@@ -1368,6 +1413,11 @@ def cute_dsl_fused_moe_nvfp4(
 
         activation_name = "Situ" if situ_beta is not None else activation.name
         op_name = f"CuteDslFusedMoE::run_moe_nvfp4::{activation_name}"
+        if localized_weights is not None:
+            policy = (
+                "AdaptiveLocalized" if localized_allow_nonlocalized else "Localized"
+            )
+            op_name = f"{op_name}::{policy}"
     elif quant_mode == "w4a16":
         if situ_beta is not None or situ_linear_beta is not None:
             raise ValueError("SiTU is not supported when quant_mode='w4a16'")
@@ -1393,6 +1443,7 @@ def cute_dsl_fused_moe_nvfp4(
             swiglu_beta=swiglu_beta,
             swiglu_limit=swiglu_limit,
         )
+        runners = [runner]
         inputs = [
             x,
             token_selected_experts,
@@ -1411,29 +1462,34 @@ def cute_dsl_fused_moe_nvfp4(
             f"quant_mode must be 'nvfp4'/'w4a4' or 'w4a16' (got {quant_mode!r})."
         )
 
-    _, best_tactic = tuner.choose_one(
+    if quant_mode == "w4a16" and localized_weights is not None:
+        raise NotImplementedError(
+            "locality-domain localization is implemented for the NVFP4 "
+            f"(w4a4) path only, got quant_mode={quant_mode!r}."
+        )
+
+    best_runner, best_tactic = tuner.choose_one(
         op_name,
-        [runner],
-        runner.tuning_config,
+        runners,
+        runners[0].tuning_config,
         inputs,
         aux_stream=aux_stream,
     )
-    runner_kwargs = {"aux_stream": aux_stream}
-    if quant_mode != "w4a16":
-        runner_kwargs["use_async_memset"] = not tuner.is_tuning_mode
-        if ugpu_weights is not None:
-            # Only the final call is localized. tuner.choose_one() above probes
-            # tactics through the ordinary full-width path, which keeps tactic
-            # selection independent of the split.
-            runner_kwargs["ugpu_weights"] = ugpu_weights
-            runner_kwargs["ugpu_streams"] = ugpu_streams
-            runner_kwargs["sm_count"] = ugpu_sm_count
-    elif ugpu_weights is not None:
-        raise NotImplementedError(
-            "uGPU localization is implemented for the NVFP4 (w4a4) path only, "
-            f"got quant_mode={quant_mode!r}."
+    if localized_weights is not None:
+        selected_path = (
+            "localized"
+            if getattr(best_runner, "localized_weights", None) is not None
+            else "full"
         )
-    return runner(inputs, tactic=best_tactic, **runner_kwargs)
+        localized_moe_trace(
+            f"policy-{num_tokens}",
+            f"adaptive policy tokens={num_tokens} selected={selected_path} "
+            f"tactic={best_tactic}",
+        )
+    call_kwargs = {"aux_stream": aux_stream}
+    if quant_mode != "w4a16":
+        call_kwargs["use_async_memset"] = not tuner.is_tuning_mode
+    return best_runner(inputs, tactic=best_tactic, **call_kwargs)
 
 
 __all__ = [

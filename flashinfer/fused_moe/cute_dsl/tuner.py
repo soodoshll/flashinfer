@@ -252,16 +252,38 @@ def get_rubin_gemm2_valid_tactics(tile_size: int) -> List[Tuple]:
     return valid_tactics
 
 
+RUBIN_TILE256_MOE_TACTIC_ALLOWLIST: Tuple[Tuple, ...] = (
+    (
+        256,
+        ((256, 128, 256), (256, 128, 128), (2, 1), False),
+        ((256, 128, 256), (128, 128, 128), (1, 1), False),
+    ),
+    (
+        256,
+        ((256, 128, 256), (256, 128, 128), (2, 1), False),
+        ((256, 256, 256), (128, 256, 128), (1, 1), False),
+    ),
+    (
+        256,
+        ((256, 256, 256), (256, 256, 128), (2, 1), False),
+        ((256, 128, 256), (128, 128, 128), (1, 1), False),
+    ),
+    (
+        256,
+        ((256, 256, 256), (256, 256, 128), (2, 1), False),
+        ((256, 256, 256), (128, 256, 128), (1, 1), False),
+    ),
+)
+
+
 def get_rubin_moe_valid_tactics() -> List[Tuple]:
     """Get all valid Rubin MoE tactic combinations.
 
     Returns: List of (tile_size, gemm1_tactic, gemm2_tactic)
     """
     tactics = []
-    # Only tile_size=128 is enabled. tile_size=256 with B-reuse causes
-    # illegal memory accesses for certain GEMM2 tactic configurations and
-    # is disabled until the kernel bug is fixed (mirrors the Blackwell
-    # restriction in get_blackwell_moe_valid_tactics).
+    # Keep the broadly validated tile-128 space and the explicitly validated
+    # tile-256 pipelines. Other tile-256/B-reuse combinations remain unsafe.
     for tile_size in [128]:
         gemm1_tactics = get_rubin_gemm1_valid_tactics(tile_size)
         gemm2_tactics = get_rubin_gemm2_valid_tactics(tile_size)
@@ -269,6 +291,7 @@ def get_rubin_moe_valid_tactics() -> List[Tuple]:
             gemm1_tactics, gemm2_tactics
         ):
             tactics.append((tile_size, gemm1_tactic, gemm2_tactic))
+    tactics.extend(RUBIN_TILE256_MOE_TACTIC_ALLOWLIST)
     return tactics
 
 
@@ -422,6 +445,11 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
         output_dtype: Output data type (default: torch.bfloat16).
         use_per_token_activation: Whether inputs include per-token row scales
             for GEMM1.
+        use_cuda_graph: Whether autotuning profiles CUDA Graph replay.
+        localized_weights: Optional per-locality-domain weight shards.
+        localized_streams: One green-context stream per localized shard.
+        localized_sm_count: SM count assigned to each localized shard.
+        localized_memset_stream: Optional stream used to overlap output zeroing.
         situ_beta: When set with ActivationType.Swiglu, use the SiTU gate.
         situ_linear_beta: Optional SiTU tanh clamp for the up branch.
 
@@ -446,6 +474,11 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
         situ_beta: Optional[float] = None,
         situ_linear_beta: Optional[float] = None,
         use_per_token_activation: bool = False,
+        use_cuda_graph: bool = False,
+        localized_weights: Optional[list] = None,
+        localized_streams: Optional[list] = None,
+        localized_sm_count: Optional[int] = None,
+        localized_memset_stream: Optional[torch.cuda.Stream] = None,
     ):
         activation_type, gated = normalize_cute_dsl_moe_activation_type(activation_type)
         validate_cute_dsl_moe_situ_config(activation_type, situ_beta, situ_linear_beta)
@@ -465,6 +498,22 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
         self.situ_beta = situ_beta
         self.situ_linear_beta = situ_linear_beta
         self.use_per_token_activation = use_per_token_activation
+        self.use_cuda_graph = use_cuda_graph
+        self.localized_weights = localized_weights
+        self.localized_streams = localized_streams
+        self.localized_sm_count = localized_sm_count
+        self.localized_memset_stream = localized_memset_stream
+
+        if localized_weights is not None and (
+            not localized_weights
+            or localized_streams is None
+            or len(localized_streams) != len(localized_weights)
+            or localized_sm_count is None
+        ):
+            raise ValueError(
+                "localized runner requires at least one weight shard, one stream "
+                "per shard, and localized_sm_count"
+            )
 
         # Helper that builds a deterministic balanced approx-max-load
         # assignment for token_selected_experts during autotune profiling.
@@ -583,6 +632,24 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
             # between profile iterations yields autotune timings
             # representative of production cold-cache conditions.
             use_cold_l2_cache=True,
+            use_cuda_graph=use_cuda_graph,
+        )
+
+    def _localization_signature(self) -> tuple:
+        if self.localized_weights is None:
+            return ()
+        shard_shapes = tuple(
+            (
+                tuple(shard["w1_weight"].shape),
+                tuple(shard["w2_weight"].shape),
+            )
+            for shard in self.localized_weights
+        )
+        return (
+            "localized",
+            self.localized_sm_count,
+            shard_shapes,
+            self.localized_memset_stream is not None,
         )
 
     def __hash__(self):
@@ -601,11 +668,13 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
                 self.situ_beta,
                 self.situ_linear_beta,
                 self.use_per_token_activation,
+                self.use_cuda_graph,
+                self._localization_signature(),
             )
         )
 
     def get_cache_key_extras(self, inputs: List[torch.Tensor]) -> tuple:
-        return (
+        extras = (
             int(self.activation_type),
             self.swiglu_alpha,
             self.swiglu_beta,
@@ -613,6 +682,17 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
             self.situ_beta,
             self.situ_linear_beta,
         )
+        if self.use_cuda_graph:
+            extras += ("cuda_graph",)
+        return extras + self._localization_signature()
+
+    def _weights_for_tuning(
+        self, inputs: List[torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.localized_weights is None:
+            return inputs[4], inputs[8]
+        shard = self.localized_weights[0]
+        return shard["w1_weight"], shard["w2_weight"]
 
     def get_valid_tactics(  # type: ignore[override]
         self,
@@ -629,7 +709,7 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
         from .moe_utils import get_max_num_permuted_tokens
 
         x = inputs[0]
-        w1_weight = inputs[4]
+        w1_weight, w2_weight = self._weights_for_tuning(inputs)
 
         gated = self.gated
         num_tokens = x.shape[0]
@@ -639,6 +719,8 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
         # has a single intermediate-row projection.
         gemm1_n = w1_weight.shape[1]
         intermediate_size = gemm1_n // 2 if gated else gemm1_n
+        gemm2_n = w2_weight.shape[1]
+        gemm2_k = w2_weight.shape[2] * 2
 
         ab_dtype = cutlass.Float4E2M1FN
         sf_dtype = cutlass.Float8E4M3FN
@@ -716,8 +798,8 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
                     mma_tiler=gemm2_mma_tiler,
                     cluster_shape_mn=gemm2_cluster_shape_mn,
                     m=permuted_m,
-                    n=hidden_size,
-                    k=intermediate_size,
+                    n=gemm2_n,
+                    k=gemm2_k,
                     l=num_local_experts,
                     a_major="k",
                     b_major="k",
@@ -756,8 +838,8 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
                     mma_tiler_mn=gemm2_mma_tiler_mn,
                     cluster_shape_mn=gemm2_cluster_shape_mn,
                     m=permuted_m,
-                    n=hidden_size,
-                    k=intermediate_size,
+                    n=gemm2_n,
+                    k=gemm2_k,
                     l=num_local_experts,
                     a_major="k",
                     b_major="k",
@@ -840,6 +922,14 @@ class CuteDslFusedMoENvfp4Runner(TunableRunner):
         else:
             per_token_scale = None
             moe_output = optional_inputs[0] if optional_inputs else None
+
+        if self.localized_weights is not None:
+            kwargs.update(
+                localized_weights=self.localized_weights,
+                localized_streams=self.localized_streams,
+                localized_memset_stream=self.localized_memset_stream,
+                sm_count=self.localized_sm_count,
+            )
 
         return self.forward_impl(
             x=x,
